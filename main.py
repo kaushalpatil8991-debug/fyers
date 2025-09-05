@@ -33,31 +33,63 @@ INDIVIDUAL_TRADE_THRESHOLD = 30000000  # ₹3 crore for individual trades
 MIN_VOLUME_SPIKE = 1000  # Minimum volume spike to consider
 
 # Google Sheets Configuration
-GOOGLE_SHEETS_ID = "1l_6Sx_u1czhY-5JdT22tpmCV8Os3XuZmZ3U2ShKDLHw"  # Your Google Sheet ID
+# GOOGLE_SHEETS_ID = "1l_6Sx_u1czhY-5JdT22tpmCV8Os3XuZmZ3U2ShKDLHw"  # Your Google Sheet ID
+GOOGLE_SHEETS_ID = os.getenv('GOOGLE_SHEETS_ID')
 
-# Hardcoded Google Service Account Credentials
+# Google Service Account Credentials from Environment Variables
+# GOOGLE_CREDENTIALS = {
+#     "type": "service_account",
+#     "project_id": "shoonya-alerts",
+#     "private_key_id": "bd60e40609581073510770e1400c49a2028ea008",
+#     "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDibx3E9Z9LC+Ju\nbp1WxDF8us4qObPEJ+Dftvo5/M2cc61GfORSfLMMF/YP15zNk+aM01oWbT8uv6Xt\ndk+DFpOGAOe9rt/Vs3gT/8SCELfp/bdDJfWEhVqKVeA5Fp07YLA6riGDRyvJ7AYm\n0l0kclbM+mFCT3Grp+to+LDRz+1UsVsgRgqEsqE09BOnSQr72u628jp5HrKsisP1\nNEkd6hefbyWDpGfEMXEE/WWyqFVYLXpGHIeHqsnIpqYYlrPcGA0kncn1gsuNLKl2\nllkgwAwVOwBgPH3xKEkP0zIw9gSFUItNTvuJUeHuRbg09e6rOIoxJnfWVHMRijaD\ng+mXR7vRAgMBAAECggEAOeiR8/OfG+m7rGNkoLKHN29s11avdzx9oakhgF/7U4Yv\n68V3/PKANdkQ6EdLhjXLcfuBYBfrXzDLJhoqRoupCc3Ednm5K+V8kZzJLDxLVK+6\nxRT5n70dBSDmOaNjbbKSD0fGMVUryTWv8xC8mlwVf9GOuw8nMm+84Dktu1LSTuSb\nk99iuWQsV25cN6lHQJsOOyNrxGj4WHi9uhBRTDn9UYpUclEGfyrOpQ/edN9MOemx\nHHn2VQ1GsWJc4tVipQvPiB5hfa0lyzKXTkwsL4LUmvJGwVOx2n19XNDbdf3f2Ubg\nYUCzRIPaWQz3qIUyP3dTyIsC0chGeOBrhvZeP731swKBgQDxlRlezQl1SJ7/cmuZ\nTx5wpbw7LTw4ZP8igNgx5hwyg+wO4A7fsDpOS9JKWV2biLFbGDYmQB5xF1aCHSWg\neirRvJXgRDDfuNwIl1g5Y0O3Wa5axy3AtWa0kxzY0DrAIjA0ZZ5Qst1Iyhs7/eoW\n5yOsY/IX3KA7U4cyd5z2VbOczwKBgQDv8pSAgrr2VS18hxPSIcLTdhQBosw8G4ZA\nTqPP2XmqbpHhqqA39IrG7bP/9XUEno5KNB96Jypp1dMgVhqj87m0OY+i0gUAc53y\nBFQK3Y2ekBynnr923vIxGidF9ZJT3Xe6MRaPV1nZDoxlY2GcJDEqU4rpcdMwhd+y\nNczjuIeFXwKBgQCmYks76Ll35pFjXBnRWBWd/ffbRfdw29aAm/7KtzJ6dDOTtytn\nUoeFv2DRRiVbZtTH6a/5vjV5LFqveIWetiVhmKIc+Lo0i6w32oyv0bckw4Z7DS1s\nyUM4YQ4AIcIk7CcJH2ffKqGPbWs+cU3VglImfBuT5acR1SCLWKhpXHM9LwKBgFIk\n1bn5B1B1cJEFHT/+1tfVwJuexBR/x8IUKfhqF0DFgaOj6h291hSsI8conNrr/QJi\nPbRv3BFHZnPXhl9CfPy6B/ZRt+yjqBrGaI8fse/qniS0MA/d20P8FB3bKDEVzHst\neu+vk86/MEk1cKEnsr0uxIuOsCIYcrBrwqzi62I5AoGBAMwZ7Zv3+Cy3V4RwL0NV\nmOYrPMfKJYen3KDW0aestB7CcLbjkJ5JkTrHRbww0lTDt5fGqNNkzCRjumwEibx9\nHh9PtTjkL6Py/ejyvWyfQ+uCJ1ouUaD4eQhCl/L2gzTuhQXi5loloYEuAE/dSmb6\n4QkNDjDK+NIeg1IXKeM5yGHB\n-----END PRIVATE KEY-----\n",
+#     "client_email": "fyers-alert@shoonya-alerts.iam.gserviceaccount.com",
+#     "client_id": "106562060430559772108",
+#     "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+#     "token_uri": "https://oauth2.googleapis.com/token",
+#     "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+#     "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/fyers-alert%40shoonya-alerts.iam.gserviceaccount.com",
+#     "universe_domain": "googleapis.com"
+# }
+
+# Load Google Credentials from Individual Environment Variables
 GOOGLE_CREDENTIALS = {
     "type": "service_account",
-    "project_id": "shoonya-alerts",
-    "private_key_id": "bd60e40609581073510770e1400c49a2028ea008",
-    "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDibx3E9Z9LC+Ju\nbp1WxDF8us4qObPEJ+Dftvo5/M2cc61GfORSfLMMF/YP15zNk+aM01oWbT8uv6Xt\ndk+DFpOGAOe9rt/Vs3gT/8SCELfp/bdDJfWEhVqKVeA5Fp07YLA6riGDRyvJ7AYm\n0l0kclbM+mFCT3Grp+to+LDRz+1UsVsgRgqEsqE09BOnSQr72u628jp5HrKsisP1\nNEkd6hefbyWDpGfEMXEE/WWyqFVYLXpGHIeHqsnIpqYYlrPcGA0kncn1gsuNLKl2\nllkgwAwVOwBgPH3xKEkP0zIw9gSFUItNTvuJUeHuRbg09e6rOIoxJnfWVHMRijaD\ng+mXR7vRAgMBAAECggEAOeiR8/OfG+m7rGNkoLKHN29s11avdzx9oakhgF/7U4Yv\n68V3/PKANdkQ6EdLhjXLcfuBYBfrXzDLJhoqRoupCc3Ednm5K+V8kZzJLDxLVK+6\nxRT5n70dBSDmOaNjbbKSD0fGMVUryTWv8xC8mlwVf9GOuw8nMm+84Dktu1LSTuSb\nk99iuWQsV25cN6lHQJsOOyNrxGj4WHi9uhBRTDn9UYpUclEGfyrOpQ/edN9MOemx\nHHn2VQ1GsWJc4tVipQvPiB5hfa0lyzKXTkwsL4LUmvJGwVOx2n19XNDbdf3f2Ubg\nYUCzRIPaWQz3qIUyP3dTyIsC0chGeOBrhvZeP731swKBgQDxlRlezQl1SJ7/cmuZ\nTx5wpbw7LTw4ZP8igNgx5hwyg+wO4A7fsDpOS9JKWV2biLFbGDYmQB5xF1aCHSWg\neirRvJXgRDDfuNwIl1g5Y0O3Wa5axy3AtWa0kxzY0DrAIjA0ZZ5Qst1Iyhs7/eoW\n5yOsY/IX3KA7U4cyd5z2VbOczwKBgQDv8pSAgrr2VS18hxPSIcLTdhQBosw8G4ZA\nTqPP2XmqbpHhqqA39IrG7bP/9XUEno5KNB96Jypp1dMgVhqj87m0OY+i0gUAc53y\nBFQK3Y2ekBynnr923vIxGidF9ZJT3Xe6MRaPV1nZDoxlY2GcJDEqU4rpcdMwhd+y\nNczjuIeFXwKBgQCmYks76Ll35pFjXBnRWBWd/ffbRfdw29aAm/7KtzJ6dDOTtytn\nUoeFv2DRRiVbZtTH6a/5vjV5LFqveIWetiVhmKIc+Lo0i6w32oyv0bckw4Z7DS1s\nyUM4YQ4AIcIk7CcJH2ffKqGPbWs+cU3VglImfBuT5acR1SCLWKhpXHM9LwKBgFIk\n1bn5B1B1cJEFHT/+1tfVwJuexBR/x8IUKfhqF0DFgaOj6h291hSsI8conNrr/QJi\nPbRv3BFHZnPXhl9CfPy6B/ZRt+yjqBrGaI8fse/qniS0MA/d20P8FB3bKDEVzHst\neu+vk86/MEk1cKEnsr0uxIuOsCIYcrBrwqzi62I5AoGBAMwZ7Zv3+Cy3V4RwL0NV\nmOYrPMfKJYen3KDW0aestB7CcLbjkJ5JkTrHRbww0lTDt5fGqNNkzCRjumwEibx9\nHh9PtTjkL6Py/ejyvWyfQ+uCJ1ouUaD4eQhCl/L2gzTuhQXi5loloYEuAE/dSmb6\n4QkNDjDK+NIeg1IXKeM5yGHB\n-----END PRIVATE KEY-----\n",
-    "client_email": "fyers-alert@shoonya-alerts.iam.gserviceaccount.com",
-    "client_id": "106562060430559772108",
+    "project_id": os.getenv('GOOGLE_PROJECT_ID'),
+    "private_key_id": os.getenv('GOOGLE_PRIVATE_KEY_ID'),
+    "private_key": os.getenv('GOOGLE_PRIVATE_KEY'),
+    "client_email": os.getenv('GOOGLE_CLIENT_EMAIL'),
+    "client_id": os.getenv('GOOGLE_CLIENT_ID'),
     "auth_uri": "https://accounts.google.com/o/oauth2/auth",
     "token_uri": "https://oauth2.googleapis.com/token",
     "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-    "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/fyers-alert%40shoonya-alerts.iam.gserviceaccount.com",
+    "client_x509_cert_url": os.getenv('GOOGLE_CLIENT_X509_CERT_URL'),
     "universe_domain": "googleapis.com"
 }
 
-# Hardcoded Fyers Access Token
-FYERS_ACCESS_TOKEN = ""
-FYERS_TOKEN_TIMESTAMP = 1757005253.571254
-FYERS_TOKEN_CREATED_AT = "2025-09-04 22:30:53"
+# Check if all required Google credentials are present
+required_google_fields = ['GOOGLE_PROJECT_ID', 'GOOGLE_PRIVATE_KEY_ID', 'GOOGLE_PRIVATE_KEY', 
+                          'GOOGLE_CLIENT_EMAIL', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_X509_CERT_URL']
+missing_google_fields = [field for field in required_google_fields if not os.getenv(field)]
 
-# Telegram Configuration
-TELEGRAM_BOT_TOKEN = "8360146544:AAEObU8_9LoGTZk66PVSwcayD5Hw5fnHTgY"  # Replace with your bot token
-TELEGRAM_CHAT_ID = "5715256800"      # Replace with your chat ID
+if missing_google_fields:
+    print(f"❌ Missing Google credentials environment variables: {', '.join(missing_google_fields)}")
+    GOOGLE_CREDENTIALS = None
+
+# Fyers Access Token from Environment Variables
+# FYERS_ACCESS_TOKEN = ""
+# FYERS_TOKEN_TIMESTAMP = 1757005253.571254
+# FYERS_TOKEN_CREATED_AT = "2025-09-04 22:30:53"
+
+FYERS_ACCESS_TOKEN = os.getenv('FYERS_ACCESS_TOKEN', '')
+FYERS_TOKEN_TIMESTAMP = float(os.getenv('FYERS_TOKEN_TIMESTAMP', '0'))
+FYERS_TOKEN_CREATED_AT = os.getenv('FYERS_TOKEN_CREATED_AT', '')
+
+# Telegram Configuration from Environment Variables
+# TELEGRAM_BOT_TOKEN = "8360146544:AAEObU8_9LoGTZk66PVSwcayD5Hw5fnHTgY"  # Replace with your bot token
+# TELEGRAM_CHAT_ID = "5715256800"      # Replace with your chat ID
+
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 TELEGRAM_POLLING_INTERVAL = 5  # Seconds to wait between checking for new messages
 TELEGRAM_AUTH_TIMEOUT = 300    # 5 minutes timeout for auth code input
 
@@ -1429,11 +1461,19 @@ class GoogleSheetsManager:
         self.worksheet = None
         self.lock = threading.Lock()
         self.detector = detector  # Reference to the detector for accessing counts
-        self.initialize_sheets()
+        self.sheets_initialized = self.initialize_sheets()
+        
+        if not self.sheets_initialized:
+            print("⚠️  Google Sheets initialization failed. Data will not be saved to sheets.")
     
     def initialize_sheets(self):
         """Initialize Google Sheets connection"""
         try:
+            # Check if credentials are available
+            if GOOGLE_CREDENTIALS is None:
+                print("❌ Google credentials not available from environment variables")
+                return False
+                
             # Define the scope
             scope = [
                 "https://spreadsheets.google.com/feeds",
@@ -1441,7 +1481,7 @@ class GoogleSheetsManager:
             ]
             
             # Load credentials
-            # Use hardcoded credentials instead of file
+            # Use credentials from environment variables
             creds = Credentials.from_service_account_info(GOOGLE_CREDENTIALS, scopes=scope)
             self.gc = gspread.authorize(creds)
             
@@ -1495,6 +1535,12 @@ class GoogleSheetsManager:
             
         except Exception as e:
             print(f"❌ Error initializing Google Sheets: {e}")
+            print("🔧 Troubleshooting steps:")
+            print("1. Check if GOOGLE_SHEETS_ID is correct")
+            print("2. Verify service account email has access to the sheet")
+            print("3. Ensure Google credentials are valid")
+            print("4. Check if the sheet exists and is not deleted")
+            self.worksheet = None  # Ensure worksheet is None on failure
             return False
     
     def get_ltp_color_filter(self, symbol, current_ltp, previous_ltp):
@@ -1554,6 +1600,11 @@ class GoogleSheetsManager:
                            previous_ltp=None, ltp_color_format=None):
         """Add a new trade record to Google Sheets with sector information"""
         try:
+            # Check if worksheet is properly initialized
+            if self.worksheet is None:
+                print(f"❌ Google Sheets not initialized. Cannot add {symbol} to sheets.")
+                return False
+                
             with self.lock:
                 current_time = datetime.now()
                 
