@@ -1,64 +1,18 @@
-# Exported from Render on 2025-09-05T09:14:32Z
 services:
-- type: web
-  name: fyers-volume-spike-detector
-  runtime: python
-  repo: https://github.com/kaushalpatil8991-debug/fyers
-  plan: free
-  envVars:
-  - key: TELEGRAM_AUTH_TIMEOUT
-    sync: false
-  - key: TELEGRAM_POLLING_INTERVAL
-    sync: false
-  - key: TELEGRAM_CHAT_ID
-    sync: false
-  - key: TELEGRAM_BOT_TOKEN
-    sync: false
-  - key: universe_domain
-    sync: false
-  - key: client_x509_cert_url
-    sync: false
-  - key: auth_provider_x509_cert_url
-    sync: false
-  - key: token_uri
-    sync: false
-  - key: auth_uri
-    sync: false
-  - key: client_id
-    sync: false
-  - key: client_email
-    sync: false
-  - key: private_key
-    sync: false
-  - key: private_key_id
-    sync: false
-  - key: project_id
-    sync: false
-  - key: type
-    sync: false
-  - key: GOOGLE_SHEETS_ID
-    sync: false
-  - key: FYERS_PIN
-    sync: false
-  - key: FYERS_TOTP_SECRET
-    sync: false
-  - key: FYERS_REDIRECT_URI
-    sync: false
-  - key: FYERS_SECRET_KEY
-    sync: false
-  - key: FYERS_CLIENT_ID
-    sync: false
-  - key: TZ
-    sync: false
-  - key: PYTHON_VERSION
-    sync: false
-  region: oregon
-  buildCommand: pip install -r requirements.txt
-  startCommand: python main.py
-  autoDeployTrigger: commit
-  buildFilter:
-    paths:
-    - requirements.txt
-    - main.py
-    - '*.py'
-version: "1"
+  - type: web
+    name: fyers-volume-spike-detector
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.7
+      - key: TZ
+        value: Asia/Kolkata
+    buildFilter:
+      paths:
+        - requirements.txt
+        - main.py
+        - "*.py"
