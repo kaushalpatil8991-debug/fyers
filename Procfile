@@ -1,4 +1,2 @@
-# For multiple processes
-web: python main.py
-worker: python main.py --worker
-scheduler: python main.py --scheduler
+# Single process with Flask health endpoint + IST-aware supervisor
+web: python main2.py
