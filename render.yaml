@@ -3,7 +3,7 @@ services:
     name: fyers-volume-spike-detector
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    startCommand: python main2.py
     plan: free
     autoDeploy: true
     envVars:
@@ -14,5 +14,5 @@ services:
     buildFilter:
       paths:
         - requirements.txt
-        - main.py
+        - main2.py
         - "*.py"
