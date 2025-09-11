@@ -2,20 +2,31 @@ name: keep-render-awake
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # runs every 10 minutes
-  workflow_dispatch:          # lets you trigger manually too
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping Render service only during 09:13–16:00 IST
+      - name: Ping Render service only during 09:13-16:00 IST
         run: |
-          now=$(date -u +%H%M)   # current UTC time (HHMM)
-          # IST = UTC+5:30
-          # Market hours = 09:13–16:00 IST = 03:43–10:30 UTC
+          now=$(date -u +%H%M)
+          echo "🕐 Current UTC time: $now"
+          # IST = UTC+5:30 → Market hours = 03:43–10:30 UTC
           if [[ "$now" > "0343" && "$now" < "1030" ]]; then
-            curl -fsS https://your-app.onrender.com/health || true
+            echo "✅ Inside market hours - pinging Render service..."
+            for i in {1..3}; do
+              if curl -fsS --max-time 6 -H "User-Agent: keep-render-awake" \
+                   https://fyers-volume-spike-detector.onrender.com/health; then
+                echo "✅ Health check successful"
+                exit 0
+              fi
+              echo "⚠️ Attempt $i failed; retrying in 5s..."
+              sleep 5
+            done
+            echo "❌ Health check failed after retries (non-fatal)"; exit 0
           else
             echo "⏸️ Outside market hours ($now UTC) - no ping sent"
+            echo "📅 Market hours: 03:43–10:30 UTC (09:13–16:00 IST)"
           fi
