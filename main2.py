@@ -6,6 +6,7 @@ Detects large individual trades and updates Google Sheets in real-time with sect
 
 import json
 import os
+import sys
 import time
 import threading
 import requests
@@ -112,17 +113,37 @@ def _stop_stream_once():
 
 def _stream_worker(stop_event: threading.Event):
     """
-    Worker thread that runs the VolumeSpikeDetector with stop event support.
+    Simplified worker that runs the detector with proper error handling
     """
-    try:
-        detector = VolumeSpikeDetector()
-        # Set the stop event in the detector for graceful shutdown
-        detector.stop_event = stop_event
-        detector.run()
-    except Exception as e:
-        print(f"❌ Error in stream worker: {e}")
-        import traceback
-        traceback.print_exc()
+    max_retries = 3
+    retry_count = 0
+    
+    while not stop_event.is_set() and retry_count < max_retries:
+        try:
+            detector = VolumeSpikeDetector()
+            detector.stop_event = stop_event
+            
+            # Initialize and run
+            if detector.initialize():
+                detector.start_monitoring()
+            else:
+                print("❌ Detector initialization failed")
+                retry_count += 1
+                time.sleep(30)
+                continue
+                
+        except Exception as e:
+            print(f"❌ Stream worker error: {e}")
+            retry_count += 1
+            
+            if retry_count < max_retries:
+                print(f"🔄 Retrying... ({retry_count}/{max_retries})")
+                time.sleep(30)
+            else:
+                print("❌ Max retries reached in stream worker")
+                break
+    
+    print("🛑 Stream worker stopped")
 
 def _inside_window_ist() -> bool:
     """Check if current IST time is within market hours."""
@@ -132,28 +153,53 @@ def _inside_window_ist() -> bool:
 
 def supervisor_loop():
     """
-    Runs forever:
-    - If inside 09:13–16:00 IST → ensure stream is running
-    - Else → ensure stream is stopped
+    Simplified supervisor that manages the detector lifecycle
     """
-    print("🧭 Supervisor loop started (IST-aware)")
+    print("🧭 Supervisor loop started")
+    detector = None
+    last_auth_check = time.time()
+    AUTH_CHECK_INTERVAL = 3600  # Check auth every hour
+    
     while True:
         try:
-            if not SCHEDULING_ENABLED:
-                # If scheduling disabled, just ensure we're running
-                if not _running_flag:
-                    _start_stream_once()
-                time.sleep(10)
+            current_time = time.time()
+            
+            # Check if we're in market hours
+            if SCHEDULING_ENABLED and not _inside_window_ist():
+                if detector:
+                    print("📊 Outside market hours, stopping detector...")
+                    _stop_stream_once()
+                    detector = None
+                time.sleep(60)
                 continue
-
-            if _inside_window_ist():
+            
+            # We should be running - start detector if not running
+            if not detector or not _running_flag:
+                print("🚀 Starting detector...")
+                _stop_stream_once()  # Clean stop if anything is running
+                time.sleep(2)
+                
+                # Create new detector instance
+                detector = VolumeSpikeDetector()
                 _start_stream_once()
-            else:
-                _stop_stream_once()
-
-            time.sleep(10)
+                
+            # Periodic auth check (every hour)
+            if current_time - last_auth_check > AUTH_CHECK_INTERVAL:
+                print("🔍 Performing periodic auth check...")
+                if detector and hasattr(detector, 'authenticator'):
+                    if not detector.authenticator.is_authenticated:
+                        print("⚠️ Auth expired, will re-authenticate on next cycle")
+                        _stop_stream_once()
+                        detector = None
+                last_auth_check = current_time
+            
+            # Sleep before next check
+            time.sleep(30)
+            
         except Exception as e:
-            print("Supervisor error:", e)
+            print(f"❌ Supervisor error: {e}")
+            import traceback
+            traceback.print_exc()
             time.sleep(10)
 
 
@@ -2269,16 +2315,9 @@ class VolumeSpikeDetector:
             print(f"❌ Error detecting individual trade: {e}")
     
     def start_monitoring(self):
+        """Simplified monitoring with cleaner error handling"""
         try:
-            # Reset retry count for new monitoring session
-            self.websocket_retry_count = 0
-            print("🔄 WebSocket retry count reset for new monitoring session")
-            
-            # Wait for market to start if scheduling is enabled
-            if SCHEDULING_ENABLED:
-                wait_for_market_start()
-            
-            print(f"🔗 Creating WebSocket connection...")
+            print("📡 Creating WebSocket connection...")
             self.fyers_ws = data_ws.FyersDataSocket(
                 access_token=f"{FYERS_CLIENT_ID}:{self.access_token}",
                 log_path="",
@@ -2291,141 +2330,67 @@ class VolumeSpikeDetector:
                 on_message=self.on_tick_received
             )
             
+            # Connect and subscribe
             symbols_to_monitor = STOCK_SYMBOLS[:MAX_SYMBOLS]
-            print(f"📡 Subscribing to {len(symbols_to_monitor)} symbols...")
-            print(f"🎯 Sample symbols: {symbols_to_monitor[:5]}...")
+            print(f"📊 Subscribing to {len(symbols_to_monitor)} symbols...")
             
-            print("🔌 Connecting to WebSocket...")
             self.fyers_ws.connect()
-            time.sleep(3)  # Increased wait time for connection
-            
-            print("📊 Subscribing to symbol updates...")
+            time.sleep(3)
             self.fyers_ws.subscribe(symbols=symbols_to_monitor, data_type="SymbolUpdate")
-            print("✅ Successfully subscribed to symbols")
-            print("⏳ Monitoring for volume spikes with sector classification...")
-            print("📝 Data will be automatically added to Google Sheets with sector info")
-            print("💡 Press Ctrl+C to stop")
-            print("🔄 Waiting for market data...")
             
-            # Keep the connection alive
-            tick_count = 0
+            print("✅ Monitoring started successfully")
+            
+            # Main monitoring loop
+            last_heartbeat = time.time()
+            HEARTBEAT_INTERVAL = 300  # 5 minutes
+            
             while True:
-                # Check for stop event
+                # Check stop event
                 if self.stop_event and self.stop_event.is_set():
-                    print("🛑 Stop event received, shutting down monitoring...")
-                    # Clean up WebSocket connection
-                    if self.fyers_ws:
-                        try:
-                            self.fyers_ws.close_connection()
-                            print("🔌 WebSocket connection closed")
-                        except Exception as e:
-                            print(f"⚠️ Error closing WebSocket: {e}")
+                    print("🛑 Stop event received")
                     break
-                    
-                time.sleep(1)
-                tick_count += 1
                 
-                # Check if WebSocket is still connected
-                if hasattr(self.fyers_ws, 'ws') and (self.fyers_ws.ws is None or not self.fyers_ws.ws.connected):
-                    print("⚠️ WebSocket connection lost during monitoring!")
-                    self.websocket_retry_count += 1
-                    print(f"🔄 WebSocket retry attempt {self.websocket_retry_count}/{self.max_websocket_retries}")
-                    
-                    if self.websocket_retry_count >= self.max_websocket_retries:
-                        print(f"❌ Maximum WebSocket retries ({self.max_websocket_retries}) reached. Triggering re-login...")
-                        # Mark as not authenticated to trigger re-login
-                        self.authenticator.is_authenticated = False
-                        # Reset retry count for next session
-                        self.websocket_retry_count = 0
-                        break
-                    else:
-                        print(f"⏳ Attempting to reconnect...")
-                        if not self.attempt_websocket_reconnection():
-                            print("❌ Reconnection failed, continuing with retry logic...")
-                            time.sleep(self.websocket_retry_delay)
-                        else:
-                            print("✅ Reconnection successful, continuing monitoring...")
-                            continue
+                # Send heartbeat to Telegram
+                current_time = time.time()
+                if current_time - last_heartbeat > HEARTBEAT_INTERVAL:
+                    self.send_heartbeat()
+                    last_heartbeat = current_time
                 
-                # Check if market has ended (every minute)
-                if tick_count % 60 == 0:
-                    if check_market_end():
-                        print("🔚 Market session ended. Stopping monitoring...")
-                        break
+                # Check for Telegram commands
+                if self.authenticator.telegram.check_for_restart_command():
+                    print("🔄 Restart command received")
+                    self.authenticator.telegram.send_message("🔄 Restarting system...")
+                    break
                 
-                # Check authentication status every 5 minutes (300 seconds)
-                if tick_count % 300 == 0:
-                    if not self.authenticator.is_authenticated:
-                        print(f"🔐 Checking authentication status at tick {tick_count}")
-                        self.authenticator.check_authentication_status()
+                # Sleep briefly
+                time.sleep(5)
                 
-                # Print a heartbeat every 30 seconds
-                if tick_count % 30 == 0:
-                    print(f"💓 Heartbeat: {tick_count}s - Ticks received: {self.total_ticks}")
-                
-                # Send heartbeat to Telegram every 5 minutes (300 seconds)
-                if tick_count % 300 == 0:
-                    runtime = time.time() - self.start_time
-                    heartbeat_message = f"""
+        except Exception as e:
+            print(f"❌ Monitoring error: {e}")
+            raise
+        finally:
+            if self.fyers_ws:
+                try:
+                    self.fyers_ws.close_connection()
+                except:
+                    pass
+    
+    def send_heartbeat(self):
+        """Send periodic heartbeat to Telegram"""
+        try:
+            runtime = time.time() - self.start_time
+            message = f"""
 💓 <b>System Heartbeat</b>
 
 ⏱️ <b>Runtime:</b> {runtime/60:.1f} minutes
-📈 <b>Ticks Received:</b> {self.total_ticks:,}
-🚨 <b>Large Trades:</b> {self.individual_trades_detected}
-🔗 <b>Status:</b> Active & Monitoring
+📊 <b>Ticks:</b> {self.total_ticks:,}
+🎯 <b>Trades Detected:</b> {self.individual_trades_detected}
 🕐 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
-                    """
-                    print(f"📱 Sending Telegram heartbeat at tick {tick_count}")
-                    success = self.authenticator.telegram.send_message(heartbeat_message)
-                    if success:
-                        print(f"✅ Telegram heartbeat sent successfully")
-                    else:
-                        print(f"❌ Failed to send Telegram heartbeat")
-                
-                # Check for restart command from Telegram every 5 seconds (more responsive)
-                if tick_count % 5 == 0:
-                    if self.authenticator.telegram.check_for_restart_command():
-                        print("🔄 Restart command received! Triggering re-authentication...")
-                        restart_message = f"""
-🔄 <b>Manual Restart Requested</b>
-
-📱 <b>Source:</b> Telegram Command
-🔐 <b>Action:</b> Triggering re-authentication
-🕐 <b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
-                        """
-                        self.authenticator.telegram.send_message(restart_message)
-                        
-                        # Mark as not authenticated to trigger re-login
-                        self.authenticator.is_authenticated = False
-                        # Reset retry count
-                        self.websocket_retry_count = 0
-                        # Return True to indicate restart is needed
-                        return True
-                
-        except KeyboardInterrupt:
-            print("\n👋 Stopping by user request...")
-            raise
+"""
+            self.authenticator.telegram.send_message(message)
         except Exception as e:
-            print(f"❌ WebSocket error: {e}")
-            self.websocket_retry_count += 1
-            print(f"🔄 WebSocket retry attempt {self.websocket_retry_count}/{self.max_websocket_retries}")
-            
-            if self.websocket_retry_count >= self.max_websocket_retries:
-                print(f"❌ Maximum WebSocket retries ({self.max_websocket_retries}) reached. Triggering re-login...")
-                # Mark as not authenticated to trigger re-login
-                self.authenticator.is_authenticated = False
-                # Reset retry count for next session
-                self.websocket_retry_count = 0
-            else:
-                print(f"⏳ Waiting {self.websocket_retry_delay} seconds before retry...")
-                time.sleep(self.websocket_retry_delay)
-                # Try to reconnect using the new method
-                if not self.attempt_websocket_reconnection():
-                    print("❌ Reconnection attempt failed, continuing with retry logic...")
-        
-        # Return False by default (no restart needed)
-        return False
-    
+            print(f"⚠️ Failed to send heartbeat: {e}")
+
     def run(self):
         try:
             if self.initialize():
@@ -2573,26 +2538,26 @@ for sector, count in sorted_sectors[:5]:
     print(f"      {sector}: {count} symbols")
 
 if __name__ == "__main__":
-    # 1) Boot Flask server so /health is reachable for GitHub Action pings
-    threading.Thread(target=run_flask_server, daemon=True).start()
-    print("🌐 Flask health endpoint started on port", os.environ.get('PORT', 5000))
-    
-    # 2) Start supervisor that toggles the stream by IST time
     try:
+        # Start Flask server for health endpoint
+        flask_thread = threading.Thread(target=run_flask_server, daemon=True)
+        flask_thread.start()
+        print(f"🌐 Flask health endpoint started on port {os.environ.get('PORT', 5000)}")
+        
+        # Give Flask time to start
+        time.sleep(2)
+        
+        # Start supervisor loop
+        print("🚀 Starting supervisor loop...")
         supervisor_loop()
+        
     except KeyboardInterrupt:
-        print("\n👋 Application stopped by user (Ctrl+C)")
-        print("🛑 Stopping all streams...")
+        print("\n👋 Shutting down gracefully...")
         _stop_stream_once()
-        print("👋 Goodbye!")
+        sys.exit(0)
     except Exception as e:
-        print(f"\n❌ Unexpected error occurred: {e}")
-        print("📝 Error details:")
+        print(f"❌ Fatal error: {e}")
         import traceback
         traceback.print_exc()
-        print("🛑 Stopping all streams...")
         _stop_stream_once()
-        print("🔄 Application will restart automatically in 10 seconds...")
-        time.sleep(10)
-        # Restart the application
-        exec(open(__file__).read())
+        sys.exit(1)
