@@ -6,13 +6,11 @@ services:
     startCommand: python main2.py
     plan: free
     autoDeploy: true
+    healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.7
       - key: TZ
         value: Asia/Kolkata
-    buildFilter:
-      paths:
-        - requirements.txt
-        - main2.py
-        - "*.py"
+      - key: PORT
+        value: 10000
