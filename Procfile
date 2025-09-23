@@ -1,1 +1,2 @@
-web: python fyers_detector.py
+web: python health.py
+
