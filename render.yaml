@@ -3,7 +3,7 @@ services:
     name: fyers-volume-spike-detector
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python fyers_detector.py
+    startCommand: python health.py
     plan: free
     autoDeploy: true
     healthCheckPath: /health
@@ -14,3 +14,4 @@ services:
         value: Asia/Kolkata
       - key: PORT
         value: 10000
+
