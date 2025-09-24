@@ -87,34 +87,27 @@ def _stop_stream_once():
 def _stream_worker(stop_event: threading.Event):
     """
     Simplified worker that runs the detector with proper error handling
+    No retries - single attempt only for clean restart behavior
     """
-    max_retries = 3
-    retry_count = 0
-    
-    while not stop_event.is_set() and retry_count < max_retries:
-        try:
-            detector = VolumeSpikeDetector()
-            detector.stop_event = stop_event
+    try:
+        print("Starting detector stream worker (single attempt)")
+        detector = VolumeSpikeDetector()
+        detector.stop_event = stop_event
+        
+        # Initialize and run
+        if detector.initialize():
+            print("Detector initialized successfully")
+            detector.start_monitoring()
+        else:
+            print("Detector initialization failed - exiting")
+            return
             
-            # Initialize and run
-            if detector.initialize():
-                detector.start_monitoring()
-            else:
-                print("Detector initialization failed")
-                retry_count += 1
-                time.sleep(30)
-                continue
-                
-        except Exception as e:
-            print(f"Stream worker error: {e}")
-            retry_count += 1
-            
-            if retry_count < max_retries:
-                print(f"Retrying... ({retry_count}/{max_retries})")
-                time.sleep(30)
-            else:
-                print("Max retries reached in stream worker")
-                break
+    except Exception as e:
+        print(f"Stream worker error: {e}")
+        import traceback
+        traceback.print_exc()
+        print("Stream worker exiting due to error")
+        return
     
     print("Stream worker stopped")
 
@@ -1982,10 +1975,10 @@ class VolumeSpikeDetector:
         # Sector statistics
         self.sector_counts = {}
         
-        # WebSocket retry mechanism
+        # WebSocket retry mechanism - disabled for single-attempt restarts
         self.websocket_retry_count = 0
-        self.max_websocket_retries = 10
-        self.websocket_retry_delay = 5  # seconds
+        self.max_websocket_retries = 1  # Single attempt only
+        self.websocket_retry_delay = 2  # Shorter delay
         
     def initialize(self):
         print("Initializing Enhanced Volume Spike Detector with Sector Classification...")
@@ -2345,11 +2338,11 @@ Top Sectors:
                     self.send_heartbeat()
                     last_heartbeat = current_time
                 
-                # Check for Telegram commands
-                if self.authenticator.telegram.check_for_restart_command():
-                    print("Restart command received")
-                    self.authenticator.telegram.send_message("Restarting system...")
-                    break
+                # Check for Telegram commands (disabled for health.py controlled restarts)
+                # if self.authenticator.telegram.check_for_restart_command():
+                #     print("Restart command received")
+                #     self.authenticator.telegram.send_message("Restarting system...")
+                #     break
                 
                 # Sleep briefly
                 time.sleep(5)
