@@ -32,8 +32,6 @@ detector_starting = False
 restart_count = 0
 max_restarts = 5
 last_restart_time = 0
-manual_restart_count = 0
-manual_restart_in_progress = False
 
 @app.get("/")
 async def root():
@@ -45,7 +43,7 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Primary health check endpoint"""
-    global detector_process, restart_count, manual_restart_count
+    global detector_process, restart_count
     detector_status = "unknown"
     
     if detector_process:
@@ -63,34 +61,47 @@ async def health_check():
             "timestamp": datetime.now().isoformat(),
             "uptime": time.time() - start_time,
             "detector_status": detector_status,
-            "restart_count": restart_count,
-            "manual_restart_count": manual_restart_count
+            "restart_count": restart_count
         }
     )
 
 @app.post("/restart-detector")
 async def restart_detector():
-    """Manually restart the detector"""
-    global detector_process, restart_count
+    """Manually restart the detector - single attempt only"""
+    global detector_process
     
     try:
+        print("Manual restart command received")
+        
         # Stop current process if running
         if detector_process and detector_process.poll() is None:
+            print("Stopping current detector process...")
             detector_process.terminate()
             time.sleep(2)
             if detector_process.poll() is None:
+                print("Force killing detector process...")
                 detector_process.kill()
+            detector_process = None
         
-        # Reset restart counter for manual restart
-        restart_count = 0
-        
-        # Start new process
+        # Single restart attempt - no retries
+        print("Starting detector (single attempt)...")
         start_detector()
         
-        return JSONResponse(
-            status_code=200,
-            content={"message": "Detector restart initiated", "restart_count": restart_count}
-        )
+        # Give it a moment to start
+        time.sleep(2)
+        
+        # Check if it started successfully
+        if detector_process and detector_process.poll() is None:
+            return JSONResponse(
+                status_code=200,
+                content={"message": "Detector restart successful", "status": "running"}
+            )
+        else:
+            return JSONResponse(
+                status_code=200,
+                content={"message": "Detector restart attempted but process may have failed", "status": "unknown"}
+            )
+            
     except Exception as e:
         return JSONResponse(
             status_code=500,
@@ -104,14 +115,16 @@ async def stop_detector():
     
     try:
         if detector_process and detector_process.poll() is None:
+            print("Stopping detector process...")
             detector_process.terminate()
             time.sleep(2)
             if detector_process.poll() is None:
+                print("Force killing detector process...")
                 detector_process.kill()
             detector_process = None
             return JSONResponse(
                 status_code=200,
-                content={"message": "Detector stopped"}
+                content={"message": "Detector stopped successfully"}
             )
         else:
             return JSONResponse(
@@ -123,6 +136,35 @@ async def stop_detector():
             status_code=500,
             content={"error": f"Failed to stop detector: {str(e)}"}
         )
+
+@app.get("/detector-info")
+async def detector_info():
+    """Get detailed detector information"""
+    global detector_process
+    
+    status = "unknown"
+    pid = None
+    
+    if detector_process:
+        if detector_process.poll() is None:
+            status = "running"
+            pid = detector_process.pid
+        else:
+            status = "stopped"
+            pid = f"exited with code {detector_process.returncode}"
+    else:
+        status = "not_started"
+    
+    return JSONResponse(
+        status_code=200,
+        content={
+            "detector_status": status,
+            "detector_pid": pid,
+            "restart_behavior": "single_attempt_only",
+            "websocket_retries": "limited_to_1",
+            "telegram_restart_commands": "disabled"
+        }
+    )
 
 def start_detector():
     """Start the Fyers detector process"""
