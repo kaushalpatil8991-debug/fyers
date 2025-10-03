@@ -19,7 +19,7 @@ jobs:
           echo "🔗 URL: $SERVICE_URL"
 
           for i in 1 2 3; do
-            echo "Attempt $i…"
+            echo "➡️ Attempt $i…"
             STATUS=$(curl -sS -o /tmp/body.txt -D /tmp/headers.txt \
               -A "GitHub-Actions-Keep-Alive-24x7" \
               --connect-timeout 10 --max-time 20 \
@@ -27,6 +27,7 @@ jobs:
               "$SERVICE_URL" || echo "000")
 
             echo "HTTP $STATUS"
+
             if [[ "$STATUS" =~ ^[0-9]{3}$ ]] && [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
               echo "✅ Alive"
               head -c 300 /tmp/body.txt || true
@@ -34,7 +35,7 @@ jobs:
             fi
 
             echo "Headers:"
-            sed -n '1,80p' /tmp/headers.txt || true
+            sed -n '1,60p' /tmp/headers.txt || true
             echo "Body:"
             head -c 300 /tmp/body.txt || true
             sleep 5
