@@ -63,8 +63,26 @@ def initialize_summary_components():
         if summary_generator is None or summary_handler is None:
             print("Initializing summary components...")
             
-            # Import after environment is loaded
-            from fyers_detector import DailySummaryGenerator, SummaryTelegramHandler
+            # Add current directory to path if not already there
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            if current_dir not in sys.path:
+                sys.path.insert(0, current_dir)
+            
+            # Check if fyers_detector.py exists in the current directory
+            fyers_detector_path = os.path.join(current_dir, "fyers_detector.py")
+            if not os.path.exists(fyers_detector_path):
+                print(f"Error: fyers_detector.py not found at {fyers_detector_path}")
+                return False
+            
+            # Import after environment is loaded and path is set
+            try:
+                from fyers_detector import DailySummaryGenerator, SummaryTelegramHandler
+                print("Successfully imported fyers_detector classes")
+            except ImportError as import_error:
+                print(f"Import error for fyers_detector: {import_error}")
+                print(f"Current working directory: {os.getcwd()}")
+                print(f"Python path includes: {sys.path[:3]}...")  # Show first 3 entries
+                return False
             
             # Create instances
             summary_handler = SummaryTelegramHandler()
@@ -344,6 +362,53 @@ async def test_summary():
             }
         )
 
+@app.get("/debug-import")
+async def debug_import():
+    """Debug import issues for fyers_detector module"""
+    try:
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        fyers_detector_path = os.path.join(current_dir, "fyers_detector.py")
+        
+        debug_info = {
+            "current_working_directory": os.getcwd(),
+            "health_py_directory": current_dir,
+            "fyers_detector_path": fyers_detector_path,
+            "fyers_detector_exists": os.path.exists(fyers_detector_path),
+            "python_path_length": len(sys.path),
+            "python_path_first_3": sys.path[:3],
+            "current_dir_in_path": current_dir in sys.path,
+        }
+        
+        # Try to import
+        try:
+            if current_dir not in sys.path:
+                sys.path.insert(0, current_dir)
+            from fyers_detector import DailySummaryGenerator, SummaryTelegramHandler
+            debug_info["import_success"] = True
+            debug_info["import_error"] = None
+        except Exception as e:
+            debug_info["import_success"] = False  
+            debug_info["import_error"] = str(e)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "debug_info": debug_info,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": f"Debug failed: {str(e)}",
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+
 @app.get("/debug-sheets")
 async def debug_sheets():
     """Debug Google Sheets data fetching"""
@@ -462,6 +527,11 @@ def telegram_command_listener():
         # Wait a bit before starting
         time.sleep(30)
         
+        # Add current directory to path if not already there
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        if current_dir not in sys.path:
+            sys.path.insert(0, current_dir)
+        
         # Initialize summary components
         if not initialize_summary_components():
             print("Failed to initialize summary components in command listener")
@@ -519,9 +589,21 @@ def start_detector():
     try:
         print("Starting Fyers detector...")
         
+        # Ensure we're in the correct directory
+        health_dir = os.path.dirname(os.path.abspath(__file__))
+        detector_path = os.path.join(health_dir, "fyers_detector.py")
+        
+        if not os.path.exists(detector_path):
+            print(f"ERROR: fyers_detector.py not found at {detector_path}")
+            return
+        
+        print(f"Starting detector from directory: {health_dir}")
+        print(f"Detector script path: {detector_path}")
+        
         # Use full path to python and capture output
         detector_process = subprocess.Popen(
-            [sys.executable, "fyers_detector.py"],
+            [sys.executable, detector_path],
+            cwd=health_dir,  # Ensure subprocess runs in correct directory
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             universal_newlines=True,
@@ -589,6 +671,16 @@ def monitor_detector():
 
 if __name__ == "__main__":
     print("Starting health server...")
+    
+    # Change to the directory where health.py is located
+    health_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.getcwd() != health_dir:
+        print(f"Changing working directory to: {health_dir}")
+        os.chdir(health_dir)
+    
+    print(f"Current working directory: {os.getcwd()}")
+    print(f"Looking for fyers_detector.py at: {os.path.join(os.getcwd(), 'fyers_detector.py')}")
+    print(f"File exists: {os.path.exists('fyers_detector.py')}")
     
     # Start detector after a short delay
     def delayed_start():
