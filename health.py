@@ -63,7 +63,7 @@ def initialize_summary_components():
         if summary_generator is None or summary_handler is None:
             print("Initializing summary components...")
             
-            # Try multiple locations to find fyers_detector.py
+            # Try multiple locations to find fyers.py
             possible_locations = [
                 os.path.dirname(os.path.abspath(__file__)),  # Same directory as health.py
                 os.getcwd(),  # Current working directory
@@ -75,18 +75,18 @@ def initialize_summary_components():
             current_dir = None
             
             for location in possible_locations:
-                test_path = os.path.join(location, "fyers_detector.py")
-                print(f"Checking for fyers_detector.py at: {test_path}")
+                test_path = os.path.join(location, "fyers.py")
+                print(f"Checking for fyers.py at: {test_path}")
                 if os.path.exists(test_path):
                     fyers_detector_path = test_path
                     current_dir = location
-                    print(f"Found fyers_detector.py at: {fyers_detector_path}")
+                    print(f"Found fyers.py at: {fyers_detector_path}")
                     break
             
             if not fyers_detector_path:
-                print("Error: fyers_detector.py not found in any of the expected locations:")
+                print("Error: fyers.py not found in any of the expected locations:")
                 for location in possible_locations:
-                    test_path = os.path.join(location, "fyers_detector.py")
+                    test_path = os.path.join(location, "fyers.py")
                     print(f"  - {test_path} (exists: {os.path.exists(test_path)})")
                 print(f"Current working directory: {os.getcwd()}")
                 print(f"Health.py location: {os.path.dirname(os.path.abspath(__file__))}")
@@ -99,10 +99,10 @@ def initialize_summary_components():
             
             # Import after environment is loaded and path is set
             try:
-                from fyers_detector import DailySummaryGenerator, SummaryTelegramHandler
-                print("Successfully imported fyers_detector classes")
+                from fyers import DailySummaryGenerator, SummaryTelegramHandler
+                print("Successfully imported fyers classes")
             except ImportError as import_error:
-                print(f"Import error for fyers_detector: {import_error}")
+                print(f"Import error for fyers: {import_error}")
                 print(f"Current working directory: {os.getcwd()}")
                 print(f"Python path includes: {sys.path[:3]}...")  # Show first 3 entries
                 return False
@@ -401,7 +401,7 @@ async def debug_import():
         
         location_status = {}
         for location in possible_locations:
-            fyers_path = os.path.join(location, "fyers_detector.py")
+            fyers_path = os.path.join(location, "fyers.py")
             location_status[location] = {
                 "path": fyers_path,
                 "exists": os.path.exists(fyers_path),
@@ -430,8 +430,8 @@ async def debug_import():
                 if location not in sys.path:
                     sys.path.insert(0, location)
                 
-                if os.path.exists(os.path.join(location, "fyers_detector.py")):
-                    from fyers_detector import DailySummaryGenerator, SummaryTelegramHandler
+                if os.path.exists(os.path.join(location, "fyers.py")):
+                    from fyers import DailySummaryGenerator, SummaryTelegramHandler
                     import_attempts.append({
                         "location": location,
                         "success": True,
@@ -598,7 +598,7 @@ def telegram_command_listener():
         ]
         
         for location in possible_locations:
-            if os.path.exists(os.path.join(location, "fyers_detector.py")):
+            if os.path.exists(os.path.join(location, "fyers.py")):
                 if location not in sys.path:
                     sys.path.insert(0, location)
                     print(f"Added {location} to Python path for telegram listener")
@@ -661,7 +661,7 @@ def start_detector():
     try:
         print("Starting Fyers detector...")
         
-        # Find fyers_detector.py in possible locations
+        # Find fyers.py in possible locations
         possible_locations = [
             os.path.dirname(os.path.abspath(__file__)),
             os.getcwd(),
@@ -673,16 +673,16 @@ def start_detector():
         health_dir = None
         
         for location in possible_locations:
-            test_path = os.path.join(location, "fyers_detector.py")
+            test_path = os.path.join(location, "fyers.py")
             if os.path.exists(test_path):
                 detector_path = test_path
                 health_dir = location
                 break
         
         if not detector_path:
-            print("ERROR: fyers_detector.py not found in any location:")
+            print("ERROR: fyers.py not found in any location:")
             for location in possible_locations:
-                test_path = os.path.join(location, "fyers_detector.py")
+                test_path = os.path.join(location, "fyers.py")
                 print(f"  - {test_path} (exists: {os.path.exists(test_path)})")
             return
         
@@ -784,7 +784,7 @@ if __name__ == "__main__":
     
     working_dir = None
     for location in possible_locations:
-        if os.path.exists(os.path.join(location, "fyers_detector.py")):
+        if os.path.exists(os.path.join(location, "fyers.py")):
             working_dir = location
             break
     
@@ -793,9 +793,9 @@ if __name__ == "__main__":
             print(f"Changing working directory to: {working_dir}")
             os.chdir(working_dir)
         print(f"Current working directory: {os.getcwd()}")
-        print(f"fyers_detector.py exists: {os.path.exists('fyers_detector.py')}")
+        print(f"fyers.py exists: {os.path.exists('fyers.py')}")
     else:
-        print("WARNING: Could not find fyers_detector.py in any expected location")
+        print("WARNING: Could not find fyers.py in any expected location")
         print(f"Current working directory: {os.getcwd()}")
         print("Available files:", [f for f in os.listdir('.') if f.endswith('.py')])
     
