@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Enhanced FastAPI Health Check Server
-Manages Render hosting, detector lifecycle, and self-health monitoring
+Simple FastAPI Health Check Server
+Lightweight service to keep Render hosting alive
 """
 
 import os
@@ -16,7 +16,17 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
-app = FastAPI(title="Health Check Service", version="2.0.0")
+# Load environment variables first
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+    print("Environment variables loaded in health.py")
+except ImportError:
+    print("python-dotenv not installed")
+except Exception as e:
+    print(f"Could not load .env file in health.py: {e}")
+
+app = FastAPI(title="Health Check Service", version="1.0.0")
 
 # Add CORS middleware
 app.add_middleware(
@@ -27,29 +37,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global state
 start_time = time.time()
 detector_process = None
 detector_starting = False
 restart_count = 0
 max_restarts = 5
 last_restart_time = 0
-manual_restart_count = 0
-health_check_url = "https://fyers-volume-spike-detector.onrender.com/health"
-last_self_health_check = time.time()
+
+# Health ping configuration
+HEALTH_PING_URL = "https://fyers-volume-spike-detector.onrender.com/health"
+HEALTH_PING_INTERVAL = 420  # 7 minutes in seconds
+last_health_ping_time = 0
+health_ping_success_count = 0
+health_ping_failure_count = 0
+
+# Global instances for summary functionality
+summary_generator = None
+summary_handler = None
+
+def initialize_summary_components():
+    """Initialize summary components with proper credentials"""
+    global summary_generator, summary_handler
+    
+    try:
+        if summary_generator is None or summary_handler is None:
+            print("Initializing summary components...")
+            
+            # Import after environment is loaded
+            from fyers_detector import DailySummaryGenerator, SummaryTelegramHandler
+            
+            # Create instances
+            summary_handler = SummaryTelegramHandler()
+            summary_generator = DailySummaryGenerator()
+            
+            # Initialize the sheets connection
+            if summary_generator.initialize_sheets():
+                print("Summary components initialized successfully")
+                return True
+            else:
+                print("Failed to initialize Google Sheets connection")
+                return False
+        return True
+        
+    except Exception as e:
+        print(f"Error initializing summary components: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 @app.get("/")
 async def root():
     return {
-        "message": "Health service running",
-        "status": "online",
-        "detector_status": "running" if (detector_process and detector_process.poll() is None) else "stopped"
+        "message": "Health service running", 
+        "status": "online"
     }
 
 @app.get("/health")
 async def health_check():
     """Primary health check endpoint"""
-    global detector_process, restart_count, manual_restart_count
+    global detector_process, restart_count, health_ping_success_count, health_ping_failure_count
     detector_status = "unknown"
     
     if detector_process:
@@ -68,18 +114,77 @@ async def health_check():
             "uptime": time.time() - start_time,
             "detector_status": detector_status,
             "restart_count": restart_count,
-            "manual_restart_count": manual_restart_count,
-            "service": "fyers-volume-spike-detector"
+            "health_ping_success": health_ping_success_count,
+            "health_ping_failure": health_ping_failure_count
         }
     )
 
-@app.post("/restart-detector")
-async def restart_detector():
-    """Manually restart the detector"""
-    global detector_process, restart_count, manual_restart_count
+@app.post("/send-summary")
+async def send_summary():
+    """Trigger immediate summary send"""
+    global summary_generator, summary_handler
     
     try:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Manual restart requested")
+        print("Manual summary send requested via API")
+        
+        # Initialize components if not already done
+        if not initialize_summary_components():
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "error",
+                    "message": "Failed to initialize summary components"
+                }
+            )
+        
+        # Generate and send summary
+        summary_message = summary_generator.format_summary_message()
+        
+        if "No data available" in summary_message or "Error" in summary_message:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "warning",
+                    "message": "Summary generated but may contain no data",
+                    "summary": summary_message,
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+        
+        if summary_handler.send_message(summary_message):
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "success",
+                    "message": "Summary sent successfully",
+                    "timestamp": datetime.now().isoformat()
+                }
+            )
+        else:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "error",
+                    "message": "Failed to send summary message"
+                }
+            )
+            
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": f"Failed to send summary: {str(e)}"
+            }
+        )
+
+@app.post("/restart-detector")
+async def restart_detector():
+    """Manually restart the detector - single attempt only"""
+    global detector_process
+    
+    try:
+        print("Manual restart command received")
         
         # Stop current process if running
         if detector_process and detector_process.poll() is None:
@@ -87,24 +192,29 @@ async def restart_detector():
             detector_process.terminate()
             time.sleep(2)
             if detector_process.poll() is None:
+                print("Force killing detector process...")
                 detector_process.kill()
+            detector_process = None
         
-        # Reset restart counter for manual restart
-        restart_count = 0
-        manual_restart_count += 1
-        
-        # Start new process
+        # Single restart attempt - no retries
+        print("Starting detector (single attempt)...")
         start_detector()
         
-        return JSONResponse(
-            status_code=200,
-            content={
-                "message": "Detector restart initiated",
-                "restart_count": restart_count,
-                "manual_restart_count": manual_restart_count,
-                "timestamp": datetime.now().isoformat()
-            }
-        )
+        # Give it a moment to start
+        time.sleep(2)
+        
+        # Check if it started successfully
+        if detector_process and detector_process.poll() is None:
+            return JSONResponse(
+                status_code=200,
+                content={"message": "Detector restart successful", "status": "running"}
+            )
+        else:
+            return JSONResponse(
+                status_code=200,
+                content={"message": "Detector restart attempted but process may have failed", "status": "unknown"}
+            )
+            
     except Exception as e:
         return JSONResponse(
             status_code=500,
@@ -118,26 +228,21 @@ async def stop_detector():
     
     try:
         if detector_process and detector_process.poll() is None:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Stopping detector...")
+            print("Stopping detector process...")
             detector_process.terminate()
             time.sleep(2)
             if detector_process.poll() is None:
+                print("Force killing detector process...")
                 detector_process.kill()
             detector_process = None
             return JSONResponse(
                 status_code=200,
-                content={
-                    "message": "Detector stopped",
-                    "timestamp": datetime.now().isoformat()
-                }
+                content={"message": "Detector stopped successfully"}
             )
         else:
             return JSONResponse(
                 status_code=200,
-                content={
-                    "message": "Detector was not running",
-                    "timestamp": datetime.now().isoformat()
-                }
+                content={"message": "Detector was not running"}
             )
     except Exception as e:
         return JSONResponse(
@@ -145,81 +250,299 @@ async def stop_detector():
             content={"error": f"Failed to stop detector: {str(e)}"}
         )
 
-@app.get("/status")
-async def get_status():
-    """Get detailed system status"""
-    global detector_process, restart_count, manual_restart_count, last_self_health_check
+@app.get("/detector-info")
+async def detector_info():
+    """Get detailed detector information"""
+    global detector_process, health_ping_success_count, health_ping_failure_count
     
-    detector_status = "unknown"
-    detector_pid = None
+    status = "unknown"
+    pid = None
     
     if detector_process:
         if detector_process.poll() is None:
-            detector_status = "running"
-            detector_pid = detector_process.pid
+            status = "running"
+            pid = detector_process.pid
         else:
-            detector_status = "stopped"
-            
+            status = "stopped"
+            pid = f"exited with code {detector_process.returncode}"
+    else:
+        status = "not_started"
+    
     return JSONResponse(
         status_code=200,
         content={
-            "health_service": {
-                "status": "running",
-                "uptime_seconds": time.time() - start_time,
-                "uptime_minutes": (time.time() - start_time) / 60
-            },
-            "detector": {
-                "status": detector_status,
-                "pid": detector_pid,
-                "restart_count": restart_count,
-                "manual_restart_count": manual_restart_count,
-                "max_restarts": max_restarts
-            },
-            "self_monitoring": {
-                "last_health_check": datetime.fromtimestamp(last_self_health_check).isoformat(),
-                "health_check_url": health_check_url
-            },
-            "timestamp": datetime.now().isoformat()
+            "detector_status": status,
+            "detector_pid": pid,
+            "restart_behavior": "single_attempt_only",
+            "websocket_retries": "limited_to_1",
+            "telegram_restart_commands": "disabled",
+            "health_ping_url": HEALTH_PING_URL,
+            "health_ping_interval": f"{HEALTH_PING_INTERVAL} seconds (7 minutes)",
+            "health_ping_success": health_ping_success_count,
+            "health_ping_failure": health_ping_failure_count,
+            "summary_components_initialized": summary_generator is not None and summary_handler is not None
         }
     )
+
+@app.get("/ping-stats")
+async def ping_stats():
+    """Get health ping statistics"""
+    global health_ping_success_count, health_ping_failure_count, last_health_ping_time
+    
+    return JSONResponse(
+        status_code=200,
+        content={
+            "health_ping_url": HEALTH_PING_URL,
+            "ping_interval_seconds": HEALTH_PING_INTERVAL,
+            "ping_interval_minutes": HEALTH_PING_INTERVAL / 60,
+            "total_success": health_ping_success_count,
+            "total_failure": health_ping_failure_count,
+            "last_ping_time": datetime.fromtimestamp(last_health_ping_time).isoformat() if last_health_ping_time > 0 else "never",
+            "next_ping_in_seconds": max(0, HEALTH_PING_INTERVAL - (time.time() - last_health_ping_time)) if last_health_ping_time > 0 else 0
+        }
+    )
+
+@app.get("/test-summary")
+async def test_summary():
+    """Test summary generation without sending"""
+    global summary_generator
+    
+    try:
+        # Initialize components if not already done
+        if not initialize_summary_components():
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "error",
+                    "message": "Failed to initialize summary components"
+                }
+            )
+        
+        # Get today's data for debugging
+        today_data = summary_generator.get_today_data()
+        
+        # Generate summary message
+        summary_message = summary_generator.format_summary_message()
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "records_found": len(today_data),
+                "summary_preview": summary_message[:500],
+                "full_summary": summary_message,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": f"Test failed: {str(e)}"
+            }
+        )
+
+@app.get("/debug-sheets")
+async def debug_sheets():
+    """Debug Google Sheets data fetching"""
+    global summary_generator
+    
+    try:
+        # Initialize components if not already done
+        if not initialize_summary_components():
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "status": "error",
+                    "message": "Failed to initialize summary components"
+                }
+            )
+        
+        # Get all records to see the actual data structure
+        all_records = summary_generator.worksheet.get_all_records()
+        
+        # Get first 5 records for inspection
+        sample_records = all_records[:5] if all_records else []
+        
+        # Get current date in different formats
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Asia/Kolkata"))
+        
+        date_formats = {
+            "dd-mm-yyyy": now.strftime("%d-%m-%Y"),
+            "yyyy-mm-dd": now.strftime("%Y-%m-%d"), 
+            "mm/dd/yyyy": now.strftime("%m/%d/%Y"),
+            "dd/mm/yyyy": now.strftime("%d/%m/%Y"),
+            "dd-mm-yy": now.strftime("%d-%m-%y")
+        }
+        
+        # Check what date values exist in the data
+        date_values = []
+        for record in all_records[:10]:  # Check first 10 records
+            date_val = record.get('Date', '')
+            if date_val:
+                date_values.append(date_val)
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "success",
+                "total_records": len(all_records),
+                "sample_records": sample_records,
+                "current_date_formats": date_formats,
+                "sample_date_values": date_values,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": f"Debug failed: {str(e)}"
+            }
+        )
+
+def send_health_ping():
+    """Send health ping to keep service alive"""
+    global last_health_ping_time, health_ping_success_count, health_ping_failure_count
+    
+    try:
+        print(f"Sending health ping to {HEALTH_PING_URL}")
+        response = requests.get(HEALTH_PING_URL, timeout=10)
+        
+        if response.status_code == 200:
+            health_ping_success_count += 1
+            print(f"Health ping successful (#{health_ping_success_count})")
+        else:
+            health_ping_failure_count += 1
+            print(f"Health ping failed with status {response.status_code} (#{health_ping_failure_count})")
+        
+        last_health_ping_time = time.time()
+        
+    except Exception as e:
+        health_ping_failure_count += 1
+        print(f"Health ping error (#{health_ping_failure_count}): {e}")
+        last_health_ping_time = time.time()
+
+def health_ping_worker():
+    """Background worker to send periodic health pings"""
+    global last_health_ping_time
+    
+    print(f"Health ping worker started - will ping every {HEALTH_PING_INTERVAL} seconds (7 minutes)")
+    
+    # Wait a bit before starting
+    time.sleep(30)
+    
+    while True:
+        try:
+            current_time = time.time()
+            
+            # Check if it's time to send a ping
+            if current_time - last_health_ping_time >= HEALTH_PING_INTERVAL:
+                send_health_ping()
+            
+            # Sleep for 1 minute before checking again
+            time.sleep(60)
+            
+        except Exception as e:
+            print(f"Health ping worker error: {e}")
+            time.sleep(60)
+
+def telegram_command_listener():
+    """Listen for 'send' command on summary Telegram bot"""
+    global summary_generator, summary_handler
+    
+    try:
+        print("Telegram command listener starting...")
+        
+        # Wait a bit before starting
+        time.sleep(30)
+        
+        # Initialize summary components
+        if not initialize_summary_components():
+            print("Failed to initialize summary components in command listener")
+            return
+        
+        print("Telegram command listener initialized successfully")
+        
+        while True:
+            try:
+                # Check for new messages
+                updates = summary_handler.get_updates()
+                
+                for update in updates:
+                    if "message" in update and "text" in update["message"]:
+                        text = update["message"]["text"].strip().lower()
+                        
+                        if text == "send":
+                            print("'Send' command received - triggering summary")
+                            
+                            # Reinitialize sheets connection to ensure fresh data
+                            summary_generator.initialize_sheets()
+                            
+                            # Generate and send summary
+                            summary_message = summary_generator.format_summary_message()
+                            
+                            if summary_handler.send_message(summary_message):
+                                print("Summary sent successfully via Telegram command")
+                            else:
+                                print("Failed to send summary via Telegram command")
+                                summary_handler.send_message("Failed to send summary. Please try again.")
+                
+                # Sleep for 5 seconds before checking again
+                time.sleep(5)
+                
+            except Exception as e:
+                print(f"Error in command listener loop: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(10)
+                
+    except Exception as e:
+        print(f"Telegram command listener error: {e}")
+        import traceback
+        traceback.print_exc()
 
 def start_detector():
     """Start the Fyers detector process"""
     global detector_process, detector_starting
     
     if detector_starting:
-        print("Detector start already in progress")
         return
         
     detector_starting = True
     
     try:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting Fyers detector...")
+        print("Starting Fyers detector...")
         
-        # Use fyers.py instead of fyers_detector.py
+        # Use full path to python and capture output
         detector_process = subprocess.Popen(
-            [sys.executable, "fyers.py"],
+            [sys.executable, "fyers_detector.py"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             universal_newlines=True,
             bufsize=1
         )
         
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Detector started with PID: {detector_process.pid}")
+        print(f"Detector started with PID: {detector_process.pid}")
         
         # Start a thread to read output
         def read_output():
             try:
                 for line in iter(detector_process.stdout.readline, ''):
                     if line:
-                        print(f"[DETECTOR] {line.strip()}")
+                        print(f"DETECTOR: {line.strip()}")
             except Exception as e:
-                print(f"[ERROR] Output reader error: {e}")
+                print(f"Output reader error: {e}")
         
         threading.Thread(target=read_output, daemon=True).start()
         
     except Exception as e:
-        print(f"[ERROR] Failed to start detector: {e}")
+        print(f"Failed to start detector: {e}")
     finally:
         detector_starting = False
 
@@ -230,8 +553,6 @@ def monitor_detector():
     # Wait before starting monitoring
     time.sleep(10)
     
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Detector monitor started")
-    
     while True:
         try:
             if detector_process is None or detector_process.poll() is not None:
@@ -240,8 +561,8 @@ def monitor_detector():
                 # Check if we've exceeded max restarts within a time window
                 if restart_count >= max_restarts:
                     if current_time - last_restart_time < 300:  # 5 minutes
-                        print(f"[WARNING] Max restarts ({max_restarts}) reached within 5 minutes")
-                        print("[WARNING] Stopping auto-restart. Manual intervention required.")
+                        print(f"Max restarts ({max_restarts}) reached within 5 minutes. Stopping auto-restart.")
+                        print("Manual intervention required. Check logs and restart manually.")
                         time.sleep(300)  # Wait 5 minutes before resetting counter
                         restart_count = 0
                         continue
@@ -250,10 +571,9 @@ def monitor_detector():
                         restart_count = 0
                 
                 if detector_process and detector_process.poll() is not None:
-                    exit_code = detector_process.returncode
-                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Detector exited with code: {exit_code}")
+                    print(f"Detector exited with code: {detector_process.returncode}")
                 
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Restarting detector (attempt {restart_count + 1}/{max_restarts})...")
+                print(f"Restarting detector... (attempt {restart_count + 1}/{max_restarts})")
                 restart_count += 1
                 last_restart_time = current_time
                 
@@ -264,50 +584,11 @@ def monitor_detector():
             time.sleep(30)  # Check every 30 seconds
             
         except Exception as e:
-            print(f"[ERROR] Monitor error: {e}")
+            print(f"Monitor error: {e}")
             time.sleep(10)
 
-def self_health_checker():
-    """Send health check requests to own endpoint every 7 minutes"""
-    global last_self_health_check
-    
-    # Wait for service to fully start
-    time.sleep(30)
-    
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Self health checker started")
-    print(f"[INFO] Will ping {health_check_url} every 7 minutes")
-    
-    while True:
-        try:
-            time.sleep(420)  # 7 minutes = 420 seconds
-            
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Sending self health check...")
-            
-            response = requests.get(health_check_url, timeout=30)
-            
-            if response.status_code == 200:
-                last_self_health_check = time.time()
-                data = response.json()
-                detector_status = data.get('detector_status', 'unknown')
-                print(f"[HEALTH] ✓ Health check successful - Detector: {detector_status}")
-            else:
-                print(f"[HEALTH] ✗ Health check failed - Status code: {response.status_code}")
-                
-        except requests.exceptions.Timeout:
-            print(f"[HEALTH] ✗ Health check timeout")
-        except requests.exceptions.RequestException as e:
-            print(f"[HEALTH] ✗ Health check error: {e}")
-        except Exception as e:
-            print(f"[ERROR] Unexpected error in health checker: {e}")
-
 if __name__ == "__main__":
-    print("="*70)
-    print("Enhanced Health Server Starting")
-    print("="*70)
-    print(f"Service: Fyers Volume Spike Detector")
-    print(f"Health Check URL: {health_check_url}")
-    print(f"Self-ping interval: 7 minutes")
-    print("="*70)
+    print("Starting health server...")
     
     # Start detector after a short delay
     def delayed_start():
@@ -315,16 +596,17 @@ if __name__ == "__main__":
         start_detector()
     
     threading.Thread(target=delayed_start, daemon=True).start()
-    
-    # Start detector monitor
     threading.Thread(target=monitor_detector, daemon=True).start()
     
-    # Start self health checker
-    threading.Thread(target=self_health_checker, daemon=True).start()
+    # Start health ping worker
+    threading.Thread(target=health_ping_worker, daemon=True).start()
+    print("Health ping worker scheduled to start in 30 seconds")
+    
+    # Start Telegram command listener
+    threading.Thread(target=telegram_command_listener, daemon=True).start()
+    print("Telegram command listener scheduled to start in 30 seconds")
     
     # Start health server
     port = int(os.getenv("PORT", 8000))
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Health server starting on port {port}")
-    print("="*70)
-    
+    print(f"Health server starting on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
