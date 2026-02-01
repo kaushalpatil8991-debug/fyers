@@ -11,7 +11,7 @@ import time
 import threading
 import requests
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 import pyotp
 from fyers_apiv3 import fyersModel
@@ -45,7 +45,7 @@ INDIVIDUAL_TRADE_THRESHOLD = 30000000  # Rs 3 crore for individual trades
 MIN_VOLUME_SPIKE = 1000  # Minimum volume spike to consider
 
 # Google Sheets Configuration
-GOOGLE_SHEETS_ID = "1l_6Sx_u1czhY-5JdT22tpmCV8Os3XuZmZ3U2ShKDLHw"  # Your Google Sheet ID
+GOOGLE_SHEETS_ID = "1kgrKVjUm0lB0fz-74Q_C-sXls7IyyqFDGhf8NZmGG4A"
 
 # =============================================================================
 # RUN CONTROLLER GLOBALS
@@ -64,7 +64,6 @@ def _start_stream_once():
     if _running_flag:
         return False
     _stop_event.clear()
-    # Start the detector in a separate thread
     threading.Thread(target=_stream_worker, args=(_stop_event,), daemon=True).start()
     _running_flag = True
     print("Stream STARTED")
@@ -76,111 +75,205 @@ def _stop_stream_once():
     if not _running_flag:
         return False
     _stop_event.set()
-    time.sleep(2)  # give your WS loop time to close
+    time.sleep(2)
     _running_flag = False
     print("Stream STOPPED")
     return False
 
 def _stream_worker(stop_event: threading.Event):
-    """
-    Simplified worker that runs the detector with proper error handling
-    No retries - single attempt only for clean restart behavior
-    """
+    """Simplified worker that runs the detector with proper error handling"""
     try:
-        print("Starting detector stream worker (single attempt)")
+        print("Starting detector stream worker (single attempt)", flush=True)
         detector = VolumeSpikeDetector()
         detector.stop_event = stop_event
         
-        # Initialize and run
+        print("Initializing detector...", flush=True)
         if detector.initialize():
-            print("Detector initialized successfully")
+            print("Detector initialized successfully", flush=True)
+            print("Starting monitoring...", flush=True)
             detector.start_monitoring()
+            print("Monitoring ended normally", flush=True)
         else:
-            print("Detector initialization failed - exiting")
+            print("Detector initialization failed - exiting", flush=True)
             return
             
     except Exception as e:
-        print(f"Stream worker error: {e}")
+        print(f"Stream worker error: {e}", flush=True)
         import traceback
         traceback.print_exc()
-        print("Stream worker exiting due to error")
+        print("Stream worker exiting due to error", flush=True)
         return
     
-    print("Stream worker stopped")
+    print("Stream worker stopped", flush=True)
 
 def _inside_window_ist() -> bool:
     """Check if current IST time is within market hours."""
+    # Check if force start flag is set
+    import builtins
+    if hasattr(builtins, 'FORCE_START') and builtins.FORCE_START:
+        return True  # Always return True when forced
+    
     now = datetime.now(ZoneInfo("Asia/Kolkata"))
     hhmm = now.strftime("%H:%M")
     return MARKET_START_TIME <= hhmm < MARKET_END_TIME
 
 def supervisor_loop():
-    """
-    Simplified supervisor that manages the detector lifecycle
-    """
-    print("Supervisor loop started")
+    """Simplified supervisor that manages the detector lifecycle"""
+    print("Supervisor loop started", flush=True)
     detector = None
     last_auth_check = time.time()
-    AUTH_CHECK_INTERVAL = 3600  # Check auth every hour
+    last_command_check = time.time()
+    AUTH_CHECK_INTERVAL = 3600
+    COMMAND_CHECK_INTERVAL = 3  # Check for commands every 10 seconds
+    
+    # Create telegram handler for checking commands
+    telegram = TelegramHandler()
     
     while True:
         try:
             current_time = time.time()
             
-            # Check if we're in market hours
-            if SCHEDULING_ENABLED and not _inside_window_ist():
-                if detector:
-                    print("Outside market hours, stopping detector...")
+            # Check for force/restart commands periodically
+            if current_time - last_command_check > COMMAND_CHECK_INTERVAL:
+                print("[SUPERVISOR] Checking for commands...", flush=True)
+                
+                # Check for force command
+                if telegram.check_for_force_command():
+                    print("[SUPERVISOR] Force command detected! Setting FORCE_START flag", flush=True)
+                    telegram.send_message("🚀 <b>Force Start Initiated</b>\n\n⏳ Bypassing market hours...\n📊 Starting detector immediately...")
+                    import builtins
+                    builtins.FORCE_START = True
+                
+                # Check for restart command
+                if telegram.check_for_restart_command():
+                    print("[SUPERVISOR] Restart command detected! Restarting detector only...", flush=True)
+                    
+                    # Send status message
+                    telegram.send_message("🔄 <b>Restarting Detector...</b>\n\n⏳ Stopping current detector process...")
+                    
+                    # Stop only the detector, not the summary scheduler
                     _stop_stream_once()
                     detector = None
+                    
+                    telegram.send_message("✅ Detector stopped\n⏳ Starting fresh detector instance...")
+                    
+                    time.sleep(2)
+                    
+                    # Create new detector instance
+                    try:
+                        detector = VolumeSpikeDetector()
+                        telegram.send_message("🔧 Detector instance created\n⏳ Initializing...")
+                        
+                        _start_stream_once()
+                        
+                        telegram.send_message("✅ <b>Detector Restarted Successfully!</b>\n\n📊 Status: Monitoring active\n⏰ Time: " + datetime.now().strftime('%H:%M:%S'))
+                        print("[SUPERVISOR] Detector restarted successfully", flush=True)
+                        
+                    except Exception as restart_error:
+                        error_msg = f"❌ <b>Restart Failed</b>\n\nError: {str(restart_error)}\n\nPlease try again or check logs."
+                        telegram.send_message(error_msg)
+                        print(f"[SUPERVISOR] Restart error: {restart_error}", flush=True)
+                    
+                    # Continue to next iteration
+                    last_command_check = current_time
+                    continue
+                
+                last_command_check = current_time
+            
+            # Check if we're in market hours
+            in_window = _inside_window_ist()
+            
+            if SCHEDULING_ENABLED and not in_window:
+                if detector:
+                    print("Outside market hours, stopping detector...", flush=True)
+                    _stop_stream_once()
+                    detector = None
+                # Don't spam logs, only print occasionally
+                if int(current_time) % 300 == 0:  # Every 5 minutes
+                    print("Waiting for market hours (or send 'force' command)...", flush=True)
                 time.sleep(60)
                 continue
             
             # We should be running - start detector if not running
             if not detector or not _running_flag:
-                print("Starting detector...")
-                _stop_stream_once()  # Clean stop if anything is running
+                print("Starting detector...", flush=True)
+                _stop_stream_once()
                 time.sleep(2)
                 
-                # Create new detector instance
-                detector = VolumeSpikeDetector()
-                _start_stream_once()
+                try:
+                    detector = VolumeSpikeDetector()
+                    print("Detector instance created, starting stream...", flush=True)
+                    _start_stream_once()
+                    print("Stream started successfully", flush=True)
+                    
+                    # Send connection status to user after successful start
+                    try:
+                        # Wait a moment for initialization to complete
+                        time.sleep(3)
+                        
+                        # Check if detector is actually running and authenticated
+                        if detector and hasattr(detector, 'authenticator') and detector.authenticator.is_authenticated:
+                            # Get user info if available
+                            user_name = "Unknown"
+                            try:
+                                if detector.authenticator.fyers_model:
+                                    profile = detector.authenticator.fyers_model.get_profile()
+                                    if profile.get('s') == 'ok':
+                                        user_name = profile['data']['name']
+                            except:
+                                pass
+                            
+                            connection_msg = f"""✅ <b>Detector Connected Successfully!</b>
+
+👤 <b>User:</b> {user_name}
+📊 <b>Status:</b> Monitoring Active
+🎯 <b>Symbols:</b> {len(STOCK_SYMBOLS)} stocks
+💰 <b>Threshold:</b> Rs {INDIVIDUAL_TRADE_THRESHOLD/10000000:.1f} Cr
+⏰ <b>Started:</b> {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}
+
+🔔 You will receive alerts for large volume spikes!"""
+                            
+                            telegram.send_message(connection_msg)
+                            print("Connection status sent to user", flush=True)
+                            
+                    except Exception as msg_error:
+                        print(f"Could not send connection message: {msg_error}", flush=True)
+                        
+                except Exception as start_error:
+                    print(f"Error starting detector: {start_error}", flush=True)
+                    telegram.send_message(f"❌ <b>Detector Start Failed</b>\n\nError: {str(start_error)}\n\nWill retry in 30 seconds...")
+                    time.sleep(30)
                 
             # Periodic auth check (every hour)
             if current_time - last_auth_check > AUTH_CHECK_INTERVAL:
-                print("Performing periodic auth check...")
+                print("Performing periodic auth check...", flush=True)
                 if detector and hasattr(detector, 'authenticator'):
                     if not detector.authenticator.is_authenticated:
-                        print("Auth expired, will re-authenticate on next cycle")
+                        print("Auth expired, will re-authenticate on next cycle", flush=True)
                         _stop_stream_once()
                         detector = None
                 last_auth_check = current_time
             
             # Sleep before next check
-            time.sleep(30)
+            time.sleep(5)  # Check more frequently
             
         except Exception as e:
-            print(f"Supervisor error: {e}")
+            print(f"Supervisor error: {e}", flush=True)
             import traceback
             traceback.print_exc()
             time.sleep(10)
 
 # Load Google Credentials from Environment Variables
 try:
-    # Try to load credentials from environment variable
     google_creds_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
     if google_creds_json:
-        # Process the JSON string to handle newlines properly
         GOOGLE_CREDENTIALS = json.loads(google_creds_json)
-        # Ensure private key newlines are properly formatted
         if 'private_key' in GOOGLE_CREDENTIALS:
             GOOGLE_CREDENTIALS['private_key'] = GOOGLE_CREDENTIALS['private_key'].replace('\\n', '\n')
         print("Google Sheets credentials loaded from environment variable")
     else:
-        # Fallback: try to load from individual environment variables
         private_key = os.getenv('GOOGLE_PRIVATE_KEY')
         if private_key:
-            # Ensure newlines are properly handled in private key
             private_key = private_key.replace('\\n', '\n')
         
         GOOGLE_CREDENTIALS = {
@@ -197,7 +290,6 @@ try:
             "universe_domain": "googleapis.com"
         }
         
-        # Check if all required fields are present
         required_fields = ['project_id', 'private_key_id', 'private_key', 'client_email', 'client_id']
         missing_fields = [field for field in required_fields if not GOOGLE_CREDENTIALS.get(field)]
         
@@ -216,7 +308,6 @@ except Exception as e:
 
 # Load Fyers Access Token from JSON file or environment variables
 try:
-    # Try to load from JSON file first
     with open('fyers_access_token.json', 'r') as f:
         token_data = json.load(f)
         FYERS_ACCESS_TOKEN = token_data.get('access_token', '')
@@ -224,30 +315,26 @@ try:
         FYERS_TOKEN_CREATED_AT = token_data.get('created_at', '')
         print("Fyers access token loaded from JSON file")
 except FileNotFoundError:
-    # Fallback to environment variables
     FYERS_ACCESS_TOKEN = os.getenv('FYERS_ACCESS_TOKEN', '')
     FYERS_TOKEN_TIMESTAMP = float(os.getenv('FYERS_TOKEN_TIMESTAMP', '0'))
     FYERS_TOKEN_CREATED_AT = os.getenv('FYERS_TOKEN_CREATED_AT', '')
     print("Fyers access token JSON file not found, using environment variables")
 except Exception as e:
-    # Fallback to environment variables on any error
     FYERS_ACCESS_TOKEN = os.getenv('FYERS_ACCESS_TOKEN', '')
     FYERS_TOKEN_TIMESTAMP = float(os.getenv('FYERS_TOKEN_TIMESTAMP', '0'))
     FYERS_TOKEN_CREATED_AT = os.getenv('FYERS_TOKEN_CREATED_AT', '')
     print(f"Error loading Fyers token from JSON: {e}, using environment variables")
 
-# Function to validate Fyers token from JSON file
 def validate_fyers_token_from_json():
     """Validate if the Fyers token from JSON file is still valid"""
     try:
         if not FYERS_ACCESS_TOKEN or FYERS_ACCESS_TOKEN.strip() == "":
             return False, "No token available"
         
-        # Check if token is expired (8 hours = 28800 seconds)
         current_time = time.time()
         token_time = FYERS_TOKEN_TIMESTAMP
         
-        if current_time - token_time < 28800:  # 8 hours
+        if current_time - token_time < 28800:
             print("Fyers token from JSON file is valid")
             return True, "Token is valid"
         else:
@@ -258,7 +345,6 @@ def validate_fyers_token_from_json():
         print(f"Error validating Fyers token: {e}")
         return False, f"Validation error: {str(e)}"
 
-# Function to save Fyers token to JSON file
 def save_fyers_token_to_json(access_token, timestamp=None, created_at=None):
     """Save Fyers access token to JSON file"""
     try:
@@ -283,9 +369,9 @@ def save_fyers_token_to_json(access_token, timestamp=None, created_at=None):
         print(f"Error saving Fyers token to JSON: {e}")
         return False
 
-# Telegram Configuration - Hardcoded
-TELEGRAM_BOT_TOKEN = "8360146544:AAEObU8_9LoGTZk66PVSwcayD5Hw5fnHTgY"
-TELEGRAM_CHAT_ID = "5715256800"
+# Telegram Configuration - For Detector
+TELEGRAM_BOT_TOKEN = "8319938541:AAHnOams-D7hni1r63pmYYb3QMa_kMtvQpE"
+TELEGRAM_CHAT_ID = "8388919023"
 TELEGRAM_POLLING_INTERVAL = 5
 TELEGRAM_AUTH_TIMEOUT = 300
 
@@ -1073,107 +1159,16 @@ def get_sector_for_symbol(symbol):
     return SECTOR_MAPPING.get(symbol, "Others")
 
 # =============================================================================
-# SCHEDULING UTILITIES
+# STOCK SYMBOLS (keeping existing list)
 # =============================================================================
 
-def is_market_time():
-    """Check if current time is within market hours"""
-    if not SCHEDULING_ENABLED:
-        return True
-    
-    current_time = datetime.now()
-    current_time_str = current_time.strftime("%H:%M")
-    
-    return MARKET_START_TIME <= current_time_str <= MARKET_END_TIME
-
-def get_time_until_market_start():
-    """Get time until market starts (in seconds)"""
-    current_time = datetime.now()
-    start_hour, start_minute = map(int, MARKET_START_TIME.split(":"))
-    market_start = current_time.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
-    
-    if current_time.time() >= market_start.time():
-        return 0
-    
-    time_diff = market_start - current_time
-    return time_diff.total_seconds()
-
-def get_time_until_market_end():
-    """Get time until market ends (in seconds)"""
-    current_time = datetime.now()
-    end_hour, end_minute = map(int, MARKET_END_TIME.split(":"))
-    market_end = current_time.replace(hour=end_hour, minute=end_minute, second=0, microsecond=0)
-    
-    if current_time.time() >= market_end.time():
-        return 0
-    
-    time_diff = market_end - current_time
-    return time_diff.total_seconds()
-
-def wait_for_market_start():
-    """Wait until market start time"""
-    if not SCHEDULING_ENABLED:
-        return
-    
-    while not is_market_time():
-        time_until_start = get_time_until_market_start()
-        if time_until_start > 0:
-            hours = int(time_until_start // 3600)
-            minutes = int((time_until_start % 3600) // 60)
-            seconds = int(time_until_start % 60)
-            
-            print(f"Waiting for market to start at {MARKET_START_TIME}...")
-            print(f"   Time remaining: {hours:02d}:{minutes:02d}:{seconds:02d}")
-            
-            if int(time_until_start) % 1800 == 0:
-                status_message = f"""
-<b>Market Schedule Status</b>
-
-<b>Current Time:</b> {datetime.now().strftime('%H:%M:%S')}
-<b>Market Start:</b> {MARKET_START_TIME}
-<b>Time Remaining:</b> {hours:02d}:{minutes:02d}:{seconds:02d}
-
-<b>Status:</b> Waiting for market to open
-                """
-                telegram_handler = TelegramHandler()
-                telegram_handler.send_message(status_message)
-            
-            time.sleep(60)
-        else:
-            break
-    
-    print(f"Market is now open! Starting monitoring at {datetime.now().strftime('%H:%M:%S')}")
-
-def check_market_end():
-    """Check if market has ended and stop monitoring"""
-    if not SCHEDULING_ENABLED:
-        return False
-    
-    if not is_market_time():
-        print(f"Market has ended at {MARKET_END_TIME}. Stopping monitoring...")
-        
-        end_message = f"""
-<b>Market Session Ended</b>
-
-<b>End Time:</b> {datetime.now().strftime('%H:%M:%S')}
-<b>Session Duration:</b> {MARKET_START_TIME} - {MARKET_END_TIME}
-
-<b>Monitoring Status:</b> Stopped
-<b>Next Session:</b> Tomorrow at {MARKET_START_TIME}
-        """
-        telegram_handler = TelegramHandler()
-        telegram_handler.send_message(end_message)
-        
-        return True
-    
-    return False
-
 STOCK_SYMBOLS = ['NSE:TCS-EQ', 'NSE:INFY-EQ', 'NSE:WIPRO-EQ', 'NSE:HCLTECH-EQ', 'NSE:TECHM-EQ', 'NSE:LTIM-EQ', 'NSE:LTTS-EQ', 'NSE:MINDTREE-EQ', 'NSE:COFORGE-EQ', 'NSE:PERSISTENT-EQ', 'NSE:CYIENT-EQ', 'NSE:MPHASIS-EQ', 'NSE:INTELLECT-EQ', 'NSE:TATAELXSI-EQ', 'NSE:KPITTECH-EQ', 'NSE:MASTEK-EQ', 'NSE:NEWGEN-EQ', 'NSE:CYIENTDLM-EQ', 'NSE:OFSS-EQ', 'NSE:ZENSAR-EQ', 'NSE:HDFCBANK-EQ', 'NSE:ICICIBANK-EQ', 'NSE:AXISBANK-EQ', 'NSE:SBIN-EQ', 'NSE:KOTAKBANK-EQ', 'NSE:INDUSINDBK-EQ', 'NSE:BANDHANBNK-EQ', 'NSE:IDFCFIRSTB-EQ', 'NSE:FEDERALBNK-EQ', 'NSE:RBLBANK-EQ', 'NSE:YESBANK-EQ', 'NSE:AUBANK-EQ', 'NSE:BANKBARODA-EQ', 'NSE:PNB-EQ', 'NSE:CANBK-EQ', 'NSE:UNIONBANK-EQ', 'NSE:BANKINDIA-EQ', 'NSE:CENTRALBK-EQ', 'NSE:IOB-EQ', 'NSE:PSB-EQ', 'NSE:IDBI-EQ', 'NSE:UCOBANK-EQ', 'NSE:INDIANB-EQ', 'NSE:CSBBANK-EQ', 'NSE:DCBBANK-EQ', 'NSE:SOUTHBANK-EQ', 'NSE:TMB-EQ', 'NSE:KTKBANK-EQ', 'NSE:J&KBANK-EQ', 'NSE:DHANBANK-EQ', 'NSE:MAHABANK-EQ', 'NSE:KARURVYSYA-EQ', 'NSE:CUB-EQ', 'NSE:UTKARSHBNK-EQ', 'NSE:ESAFSFB-EQ', 'NSE:UJJIVANSFB-EQ', 'NSE:EQUITASBNK-EQ', 'NSE:CAPITALSFB-EQ', 'NSE:SURYODAY-EQ', 'NSE:FINPIPE-EQ', 'NSE:BAJFINANCE-EQ', 'NSE:BAJAJFINSV-EQ', 'NSE:HDFCLIFE-EQ', 'NSE:SBILIFE-EQ', 'NSE:ICICIGI-EQ', 'NSE:ICICIPRULI-EQ', 'NSE:LICI-EQ', 'NSE:NIACL-EQ', 'NSE:GODIGIT-EQ', 'NSE:STARHEALTH-EQ', 'NSE:NIVABUPA-EQ', 'NSE:HDFCAMC-EQ', 'NSE:UTIAMC-EQ', 'NSE:CRISIL-EQ', 'NSE:CREDITACC-EQ', 'NSE:BFSL-EQ', 'NSE:CHOLAFIN-EQ', 'NSE:MUTHOOTFIN-EQ', 'NSE:MANAPPURAM-EQ', 'NSE:PFC-EQ', 'NSE:RECLTD-EQ', 'NSE:IRFC-EQ', 'NSE:EDELWEISS-EQ', 'NSE:IIFL-EQ', 'NSE:M&MFIN-EQ', 'NSE:SHRIRAMFIN-EQ', 'NSE:BAJAJHFL-EQ', 'NSE:CANFINHOME-EQ', 'NSE:LICHSGFIN-EQ', 'NSE:PNBHOUSING-EQ', 'NSE:REPCO-EQ', 'NSE:HOMEFIRST-EQ', 'NSE:INDOSTAR-EQ', 'NSE:SPANDANA-EQ', 'NSE:PAISALO-EQ', 'NSE:JSFB-EQ', 'NSE:SBFC-EQ', 'NSE:ASIANFIN-EQ', 'NSE:RELIGARE-EQ', 'NSE:MOTILALOFS-EQ', 'NSE:ANGELONE-EQ', 'NSE:ANANDRATHI-EQ', 'NSE:ARIHANTCAP-EQ', 'NSE:GEOJITFSL-EQ', 'NSE:NUVAMA-EQ', 'NSE:KFINTECH-EQ', 'NSE:CDSL-EQ', 'NSE:BSE-EQ', 'NSE:MCX-EQ', 'NSE:IEX-EQ', 'NSE:CAMS-EQ', 'NSE:JIOFIN-EQ', 'NSE:RELIANCE-EQ', 'NSE:ONGC-EQ', 'NSE:IOC-EQ', 'NSE:BPCL-EQ', 'NSE:HINDPETRO-EQ', 'NSE:GAIL-EQ', 'NSE:OIL-EQ', 'NSE:MGL-EQ', 'NSE:IGL-EQ', 'NSE:GUJGASLTD-EQ', 'NSE:ATGL-EQ', 'NSE:CASTROLIND-EQ', 'NSE:GULF-EQ', 'NSE:GULFOILLUB-EQ', 'NSE:GULFPETRO-EQ', 'NSE:HINDOILEXP-EQ', 'NSE:SELAN-EQ', 'NSE:MRPL-EQ', 'NSE:TNPETRO-EQ', 'NSE:CHENNPETRO-EQ', 'NSE:HINDNATGLS-EQ', 'NSE:GSPL-EQ', 'NSE:ADANIGAS-EQ', 'NSE:GSFC-EQ', 'NSE:NTPC-EQ', 'NSE:POWERGRID-EQ', 'NSE:COALINDIA-EQ', 'NSE:TATAPOWER-EQ', 'NSE:ADANIPOWER-EQ', 'NSE:ADANIGREEN-EQ', 'NSE:JSW-ENERGY-EQ', 'NSE:NHPC-EQ', 'NSE:SJVN-EQ', 'NSE:IREDA-EQ', 'NSE:NTPCGREEN-EQ', 'NSE:ADANIENSOL-EQ', 'NSE:SUZLON-EQ', 'NSE:INOXWIND-EQ', 'NSE:ORIENTGEN-EQ', 'NSE:JPPOWER-EQ', 'NSE:JPINFRATEC-EQ', 'NSE:RPOWER-EQ', 'NSE:TORNTPOWER-EQ', 'NSE:CESC-EQ', 'NSE:TRENT-EQ', 'NSE:THERMAX-EQ', 'NSE:KEC-EQ', 'NSE:RTNPOWER-EQ', 'NSE:JSWENERGY-EQ', 'NSE:INOXGREEN-EQ', 'NSE:WAAREEENER-EQ', 'NSE:SWSOLAR-EQ', 'NSE:SOLARINDS-EQ', 'NSE:INOXWI-RE-EQ', 'NSE:WEBSOL-EQ', 'NSE:WEBELSOLAR-EQ', 'NSE:GREENPOWER-EQ', 'NSE:BOROSIL-EQ', 'NSE:MARUTI-EQ', 'NSE:TATAMOTORS-EQ', 'NSE:M&M-EQ', 'NSE:EICHERMOT-EQ', 'NSE:BAJAJ-AUTO-EQ', 'NSE:HEROMOTOCO-EQ', 'NSE:TVSMOTOR-EQ', 'NSE:ASHOKLEY-EQ', 'NSE:ESCORTS-EQ', 'NSE:BALKRISIND-EQ', 'NSE:MRF-EQ', 'NSE:APOLLOTYRE-EQ', 'NSE:CEAT-EQ', 'NSE:JK-TYRE-EQ', 'NSE:MOTHERSON-EQ', 'NSE:BOSCHLTD-EQ', 'NSE:EXIDEIND-EQ', 'NSE:AMARON-EQ', 'NSE:SUNDARAM-EQ', 'NSE:TIINDIA-EQ', 'NSE:LUMAX-EQ', 'NSE:MINDA-EQ', 'NSE:ENDURANCE-EQ', 'NSE:SUPRAJIT-EQ', 'NSE:SUBROS-EQ', 'NSE:TEAMLEASE-EQ', 'NSE:FORCEMOT-EQ', 'NSE:SJS-EQ', 'NSE:SANSERA-EQ', 'NSE:SANDHAR-EQ', 'NSE:SCHAEFFLER-EQ', 'NSE:TALBROS-EQ', 'NSE:RALLIS-EQ', 'NSE:AAUTOIND-EQ', 'NSE:JAMNAAUTO-EQ', 'NSE:WHEELS-EQ', 'NSE:AUTOAXLES-EQ', 'NSE:PPAP-EQ', 'NSE:FIEM-EQ', 'NSE:GABRIEL-EQ', 'NSE:JTEKT-EQ', 'NSE:VARROC-EQ', 'NSE:MSUMI-EQ', 'NSE:UNOMINDA-EQ', 'NSE:UNIPARTS-EQ', 'NSE:RICOAUTO-EQ', 'NSE:RAMKRISHNA-EQ', 'NSE:ANANDRISHIJI-EQ', 'NSE:BAJAJHLD-EQ', 'NSE:VINATIORGA-EQ', 'NSE:BAJAJCON-EQ', 'NSE:HINDMOTORS-EQ', 'NSE:OMAXAUTO-EQ', 'NSE:BHEL-EQ', 'NSE:HINDCOPPER-EQ', 'NSE:ATULAUTO-EQ', 'NSE:SHIVAMILLS-EQ', 'NSE:CUMMINSIND-EQ', 'NSE:HONDAPOWER-EQ', 'NSE:KIRLOSKP-EQ', 'NSE:SETCO-EQ', 'NSE:MAGMA-EQ', 'NSE:OLECTRA-EQ', 'NSE:OLAELEC-EQ', 'NSE:HYUNDAI-EQ', 'NSE:MAHINDCIE-EQ', 'NSE:TATASTEEL-EQ', 'NSE:HINDALCO-EQ', 'NSE:JSWSTEEL-EQ', 'NSE:SAIL-EQ', 'NSE:VEDL-EQ', 'NSE:HINDZINC-EQ', 'NSE:JINDALSTEL-EQ', 'NSE:NMDC-EQ', 'NSE:MOIL-EQ', 'NSE:NATIONALUM-EQ', 'NSE:BALRAMCHIN-EQ', 'NSE:APL-EQ', 'NSE:RATNAMANI-EQ', 'NSE:WELSPUNIND-EQ', 'NSE:JINDALPOLY-EQ', 'NSE:ORIENTCEM-EQ', 'NSE:STEELXIND-EQ', 'NSE:LLOYDSME-EQ', 'NSE:VISAKAIND-EQ', 'NSE:ARSS-EQ', 'NSE:KALYANI-EQ', 'NSE:KALYANIFRG-EQ', 'NSE:GRAPHITE-EQ', 'NSE:UGARSUGAR-EQ', 'NSE:RSWM-EQ', 'NSE:RAIN-EQ', 'NSE:GRAVITA-EQ', 'NSE:GVKPIL-EQ', 'NSE:MANORG-EQ', 'NSE:JKLAKSHMI-EQ', 'NSE:SREESTEEL-EQ', 'NSE:SUNFLAG-EQ', 'NSE:FACOR-EQ', 'NSE:BHUSHAN-EQ', 'NSE:ROHLTD-EQ', 'NSE:ZENITHSTL-EQ', 'NSE:VISHNU-EQ', 'NSE:UTTAMSTL-EQ', 'NSE:INDIACEM-EQ', 'NSE:RAMCOCEM-EQ', 'NSE:DALMIA-EQ', 'NSE:CENTURYPLY-EQ', 'NSE:CENTEXT-EQ', 'NSE:MAGNESITA-EQ', 'NSE:ORIENTREFR-EQ', 'NSE:MADRASFERT-EQ', 'NSE:MANDHANA-EQ', 'NSE:RAMASTEEL-EQ', 'NSE:PALLADINESTEEL-EQ', 'NSE:PALREDTEC-EQ', 'NSE:SALSTEEL-EQ', 'NSE:VSTL-EQ', 'NSE:STEELCAS-EQ', 'NSE:STEELCITY-EQ', 'NSE:STEL-EQ', 'NSE:SUNSTEEL-EQ', 'NSE:MAHASTEEL-EQ', 'NSE:HISARMETAL-EQ', 'NSE:ISGEC-EQ', 'NSE:KDDL-EQ', 'NSE:KIOCL-EQ', 'NSE:MEP-EQ', 'NSE:METALFORGE-EQ', 'NSE:MITTAL-EQ', 'NSE:MUKANDLTD-EQ', 'NSE:NCML-EQ', 'NSE:ORISSAMINE-EQ', 'NSE:POKARNA-EQ', 'NSE:RAMCOIND-EQ', 'NSE:SAMTEL-EQ', 'NSE:SILGO-EQ', 'NSE:UTTAM-EQ', 'NSE:WALCHANNAG-EQ', 'NSE:WELSPUN-EQ', 'NSE:ADANIENT-EQ', 'NSE:BEML-EQ', 'NSE:SUNPHARMA-EQ', 'NSE:DRREDDY-EQ', 'NSE:CIPLA-EQ', 'NSE:DIVISLAB-EQ', 'NSE:LUPIN-EQ', 'NSE:BIOCON-EQ', 'NSE:AUROPHARMA-EQ', 'NSE:TORNTPHARM-EQ', 'NSE:GLENMARK-EQ', 'NSE:CADILAHC-EQ', 'NSE:ALKEM-EQ', 'NSE:LALPATHLAB-EQ', 'NSE:METROPOLIS-EQ', 'NSE:FORTIS-EQ', 'NSE:APOLLOHOSP-EQ', 'NSE:HCG-EQ', 'NSE:MAXHEALTH-EQ', 'NSE:NARAYANHRU-EQ', 'NSE:RAINBOWHSPL-EQ', 'NSE:KRSNAA-EQ', 'NSE:MEDANTA-EQ', 'NSE:KIMS-EQ', 'NSE:SHALBY-EQ', 'NSE:THYROCARE-EQ', 'NSE:SEQUENT-EQ', 'NSE:GRANULES-EQ', 'NSE:LAURUSLABS-EQ', 'NSE:JUBLPHARMA-EQ', 'NSE:CAPLIN-EQ', 'NSE:AJANTPHARM-EQ', 'NSE:ERIS-EQ', 'NSE:SUVEN-EQ', 'NSE:NATCOPHARM-EQ', 'NSE:STRIDES-EQ', 'NSE:GUFICBIO-EQ', 'NSE:MARKSANS-EQ', 'NSE:SOLARA-EQ', 'NSE:ORCHPHARMA-EQ', 'NSE:IPCA-EQ', 'NSE:IPCALAB-EQ', 'NSE:SYNGENE-EQ', 'NSE:BLISSGVS-EQ', 'NSE:NEULANDLAB-EQ', 'NSE:MANKIND-EQ', 'NSE:EMCURE-EQ', 'NSE:PFIZER-EQ', 'NSE:GLAXO-EQ', 'NSE:ABBOTINDIA-EQ', 'NSE:SANOFI-EQ', 'NSE:NOVARTIS-EQ', 'NSE:MSD-EQ', 'NSE:BAYER-EQ', 'NSE:WOCKPHARMA-EQ', 'NSE:INDOCO-EQ', 'NSE:FDC-EQ', 'NSE:CENTRALDRUG-EQ', 'NSE:JAGSONPAL-EQ', 'NSE:ARISTO-EQ', 'NSE:ALEMBICLTD-EQ', 'NSE:UNICHEMLAB-EQ', 'NSE:MOREPEN-EQ', 'NSE:UNICHEM-EQ', 'NSE:ADVENZYMES-EQ', 'NSE:TATACHEM-EQ', 'NSE:DEEPAKNTR-EQ', 'NSE:PIDILITIND-EQ', 'NSE:AKZOINDIA-EQ', 'NSE:HINDUNILVR-EQ', 'NSE:ITC-EQ', 'NSE:BRITANNIA-EQ', 'NSE:NESTLEIND-EQ', 'NSE:DABUR-EQ', 'NSE:GODREJCP-EQ', 'NSE:MARICO-EQ', 'NSE:COLPAL-EQ', 'NSE:EMAMILTD-EQ', 'NSE:JYOTHYLAB-EQ', 'NSE:GILLETTE-EQ', 'NSE:PGHH-EQ', 'NSE:TATACONSUM-EQ', 'NSE:UBL-EQ', 'NSE:PATANJALI-EQ', 'NSE:RADICO-EQ', 'NSE:MCDOWELL-EQ', 'NSE:VSTIND-EQ', 'NSE:KPRMILL-EQ', 'NSE:WELSPUNLIV-EQ', 'NSE:VMART-EQ', 'NSE:SHOPERSTOP-EQ', 'NSE:ADITYA-EQ', 'NSE:VENKEYS-EQ', 'NSE:HATSUN-EQ', 'NSE:SULA-EQ', 'NSE:TASTYBITE-EQ', 'NSE:BIKAJI-EQ', 'NSE:JUBLFOOD-EQ', 'NSE:HERITGFOOD-EQ', 'NSE:GOCOLORS-EQ', 'NSE:NYKAA-EQ', 'NSE:HONASA-EQ', 'NSE:MANYAVAR-EQ', 'NSE:AHLUWALIA-EQ', 'NSE:RELAXO-EQ', 'NSE:BATA-EQ', 'NSE:LIBERTSHOE-EQ', 'NSE:KHADIM-EQ', 'NSE:MIRZA-EQ', 'NSE:VIP-EQ', 'NSE:SKUMAR-EQ', 'NSE:SYMPHONY-EQ', 'NSE:VOLTAS-EQ', 'NSE:BLUESTARCO-EQ', 'NSE:HAVELLS-EQ', 'NSE:CROMPTON-EQ', 'NSE:ORIENT-EQ', 'NSE:WHIRLPOOL-EQ', 'NSE:AMBER-EQ', 'NSE:BAJAJHCARE-EQ', 'NSE:VGUARD-EQ', 'NSE:POLYCAB-EQ', 'NSE:FINOLEX-EQ', 'NSE:KEI-EQ', 'NSE:DIXON-EQ', 'NSE:TITAN-EQ', 'NSE:KALYAN-EQ', 'NSE:THANGAMAY-EQ', 'NSE:SENCO-EQ', 'NSE:TBZ-EQ', 'NSE:PCJEWELLER-EQ', 'NSE:GITANJALI-EQ', 'NSE:ULTRACEMCO-EQ', 'NSE:AMBUJACEM-EQ', 'NSE:ACC-EQ', 'NSE:SHREECEM-EQ', 'NSE:JKCEMENT-EQ', 'NSE:HEIDELBERG-EQ', 'NSE:KAKATCEM-EQ', 'NSE:KESORAMIND-EQ', 'NSE:NUVOCO-EQ', 'NSE:STARCEMENT-EQ', 'NSE:PRISMCEM-EQ', 'NSE:UDAICEMENT-EQ', 'NSE:MAGADH-EQ', 'NSE:SAURASHCEM-EQ', 'NSE:MANGLMCEM-EQ', 'NSE:DECCAN-EQ', 'NSE:LT-EQ', 'NSE:DLF-EQ', 'NSE:GODREJPROP-EQ', 'NSE:OBEROIRLTY-EQ', 'NSE:BRIGADE-EQ', 'NSE:PHOENIXMILLS-EQ', 'NSE:PRESTIGE-EQ', 'NSE:SOBHA-EQ', 'NSE:SUNTECK-EQ', 'NSE:KOLTEPATIL-EQ', 'NSE:MAHLIFE-EQ', 'NSE:LODHA-EQ', 'NSE:SIGNATURE-EQ', 'NSE:RUSTOMJEE-EQ', 'NSE:MIDHANI-EQ', 'NSE:IRCON-EQ', 'NSE:RITES-EQ', 'NSE:RVNL-EQ', 'NSE:RAILTEL-EQ', 'NSE:CONCOR-EQ', 'NSE:NCC-EQ', 'NSE:HCC-EQ', 'NSE:IRB-EQ', 'NSE:SADBHAV-EQ', 'NSE:ASHOKA-EQ', 'NSE:KNR-EQ', 'NSE:PNC-EQ', 'NSE:PATEL-EQ', 'NSE:NBCC-EQ', 'NSE:HUDCO-EQ', 'NSE:KALPATARU-EQ', 'NSE:GPIL-EQ', 'NSE:BRLM-EQ', 'NSE:IGARASHI-EQ', 'NSE:AIA-EQ', 'NSE:TITAGARH-EQ', 'NSE:TEXRAIL-EQ', 'NSE:MUKANDENG-EQ', 'NSE:BEL-EQ', 'NSE:HAL-EQ', 'NSE:GRSE-EQ', 'NSE:COCHINSHIP-EQ', 'NSE:MAZAGON-EQ', 'NSE:LXCHEM-EQ', 'NSE:HINDWAREAP-EQ', 'NSE:CERA-EQ', 'NSE:HSIL-EQ', 'NSE:SOMANY-EQ', 'NSE:KAJARIACER-EQ', 'NSE:ORIENTBELL-EQ', 'NSE:NITCO-EQ', 'NSE:ASTRAL-EQ', 'NSE:SUPREME-EQ', 'NSE:NILKAMAL-EQ', 'NSE:SINTEX-EQ', 'NSE:KANSAINER-EQ', 'NSE:PRINCEPIPE-EQ', 'NSE:APOLLOPIPE-EQ', 'NSE:UPL-EQ', 'NSE:GODREJAGRO-EQ', 'NSE:SUMICHEM-EQ', 'NSE:BASF-EQ', 'NSE:INSECTICID-EQ', 'NSE:DHANUKA-EQ', 'NSE:SHARDACROP-EQ', 'NSE:HERANBA-EQ','NSE:BHARAT-EQ', 'NSE:FACT-EQ', 'NSE:RCF-EQ', 'NSE:NFL-EQ', 'NSE:CHAMBLFERT-EQ', 'NSE:KRIBHCO-EQ', 'NSE:ZUARIAGRO-EQ', 'NSE:DEEPAKFERT-EQ', 'NSE:MADRAS-EQ', 'NSE:SOUTHERN-EQ', 'NSE:MANGALORE-EQ', 'NSE:NAGARJUNA-EQ', 'NSE:PARADEEP-EQ', 'NSE:COROMANDEL-EQ', 'NSE:IFCO-EQ', 'NSE:KHAITAN-EQ', 'NSE:KRBL-EQ', 'NSE:USHAMART-EQ', 'NSE:LAXMIORG-EQ', 'NSE:PREMIER-EQ', 'NSE:AVANTIFEED-EQ', 'NSE:GODHA-EQ', 'NSE:RUCHISOYA-EQ', 'NSE:ADANIWILMAR-EQ', 'NSE:BAJAJHIND-EQ', 'NSE:JUBLAGRI-EQ', 'NSE:PARAS-EQ', 'NSE:JKAGRI-EQ', 'NSE:NAVRATNA-EQ', 'NSE:NATIONAL-EQ', 'NSE:RAJSHREE-EQ', 'NSE:DWARIKESH-EQ', 'NSE:TRIVENI-EQ', 'NSE:BALRAMPUR-EQ', 'NSE:KOTHARI-EQ', 'NSE:MAWANA-EQ', 'NSE:DHAMPURSUG-EQ', 'NSE:RENUKA-EQ', 'NSE:KSL-EQ', 'NSE:TIRUPATI-EQ', 'NSE:SAKAR-EQ', 'NSE:VISHWARAJ-EQ', 'NSE:SAKTISUG-EQ', 'NSE:ANDHRSUGAR-EQ', 'NSE:BANNARI-EQ', 'NSE:MAGADSUGAR-EQ', 'NSE:AVADHSUGAR-EQ', 'NSE:ARVIND-EQ', 'NSE:TRIDENT-EQ', 'NSE:VARDHMAN-EQ', 'NSE:SUTLEJ-EQ', 'NSE:GRASIM-EQ', 'NSE:SPENTEX-EQ', 'NSE:INDORAMA-EQ', 'NSE:FILATEX-EQ', 'NSE:ALOKTEXT-EQ', 'NSE:BTIL-EQ', 'NSE:MAFATLAL-EQ', 'NSE:RAYMOND-EQ', 'NSE:VIPIND-EQ', 'NSE:DONEAR-EQ', 'NSE:HIMATSEIDE-EQ', 'NSE:CENTUM-EQ', 'NSE:DOLLAR-EQ', 'NSE:KITEX-EQ', 'NSE:SHIVTEX-EQ', 'NSE:BANSWARA-EQ', 'NSE:BSL-EQ', 'NSE:ALBK-EQ', 'NSE:BIRLA-EQ', 'NSE:DHANVARSHA-EQ', 'NSE:GTN-EQ', 'NSE:GOKUL-EQ', 'NSE:HIRA-EQ', 'NSE:KGDENIM-EQ', 'NSE:LOYAL-EQ', 'NSE:MONACO-EQ', 'NSE:MSP-EQ', 'NSE:NAHAR-EQ', 'NSE:NITIN-EQ', 'NSE:PRADEEP-EQ', 'NSE:SARLA-EQ', 'NSE:SHANTIGEAR-EQ', 'NSE:SOMATEX-EQ', 'NSE:STYLAMIND-EQ', 'NSE:TEXINFRA-EQ', 'NSE:TEXMOPIPES-EQ', 'NSE:UNIPHOS-EQ', 'NSE:VARDHACRLC-EQ', 'NSE:VARDMNPOLY-EQ', 'NSE:WEIZMANIND-EQ', 'NSE:ZEEL-EQ', 'NSE:SUNTV-EQ', 'NSE:PVRINOX-EQ', 'NSE:NETWORK18-EQ', 'NSE:TV18BRDCST-EQ', 'NSE:JAGRAN-EQ', 'NSE:SAREGAMA-EQ', 'NSE:TIPSFILMS-EQ', 'NSE:TIPSMUSIC-EQ', 'NSE:RADIOCITY-EQ', 'NSE:DBCORP-EQ', 'NSE:HTMEDIA-EQ', 'NSE:NAVNETEDUL-EQ', 'NSE:NAZARA-EQ', 'NSE:ONMOBILE-EQ', 'NSE:UFO-EQ', 'NSE:EROS-EQ', 'NSE:BALAJITELE-EQ', 'NSE:CINELINE-EQ', 'NSE:CINEVISTA-EQ', 'NSE:CELEBRITY-EQ', 'NSE:SHEMAROO-EQ', 'NSE:YASHRAJ-EQ', 'NSE:PRITIKA-EQ', 'NSE:RELCAPITAL-EQ', 'NSE:RELMEDIA-EQ', 'NSE:NEXTMEDIA-EQ', 'NSE:BHARTIARTL-EQ', 'NSE:RJIO-EQ', 'NSE:IDEA-EQ', 'NSE:BSNL-EQ', 'NSE:MTNL-EQ', 'NSE:HFCL-EQ', 'NSE:STLTECH-EQ', 'NSE:GTPL-EQ', 'NSE:DEN-EQ', 'NSE:HATHWAY-EQ', 'NSE:SITI-EQ', 'NSE:ORTEL-EQ', 'NSE:TEJAS-EQ', 'NSE:RCOM-EQ', 'NSE:OPTIEMUS-EQ', 'NSE:ONEPOINT-EQ', 'NSE:CIGNITITEC-EQ', 'NSE:SMARTLINK-EQ', 'NSE:VINDHYATEL-EQ', 'NSE:TATACOMM-EQ', 'NSE:TANLA-EQ', 'NSE:ROUTE-EQ', 'NSE:ZENTEC-EQ', 'NSE:MOSCHIP-EQ', 'NSE:INDIGO-EQ', 'NSE:SPICEJET-EQ', 'NSE:JETAIRWAYS-EQ', 'NSE:TCI-EQ', 'NSE:VTL-EQ', 'NSE:ALLCARGO-EQ', 'NSE:BLUEDART-EQ', 'NSE:DELHIVERY-EQ', 'NSE:MAHLOG-EQ', 'NSE:SICAL-EQ', 'NSE:SNOWMAN-EQ', 'NSE:GATI-EQ', 'NSE:APOLLO-EQ', 'NSE:AEGISLOG-EQ', 'NSE:THOMASCOOK-EQ', 'NSE:COX&KINGS-EQ', 'NSE:KESARENT-EQ', 'NSE:YATRA-EQ', 'NSE:MAKEMYTRIP-EQ', 'NSE:EASEMYTRIP-EQ', 'NSE:IXIGO-EQ', 'NSE:ADANIPORTS-EQ', 'NSE:JSWINFRA-EQ', 'NSE:MHRIL-EQ', 'NSE:ESSELPACK-EQ', 'NSE:SAGCEM-EQ', 'NSE:INDIANHOTELS-EQ', 'NSE:LEMONTREE-EQ', 'NSE:CHALET-EQ', 'NSE:MAHINDRA-EQ', 'NSE:EIHOTEL-EQ', 'NSE:ITCHOTELS-EQ', 'NSE:ORIENTHOT-EQ', 'NSE:LEMON-EQ', 'NSE:TGBHOTELS-EQ', 'NSE:PARKHOTELS-EQ', 'NSE:KAMAT-EQ', 'NSE:ADVANI-EQ', 'NSE:SAMHI-EQ', 'NSE:BAJAJHLDNG-EQ', 'NSE:GODREJIND-EQ', 'NSE:SIEMENS-EQ', 'NSE:ABB-EQ', 'NSE:HONEYWELL-EQ', 'NSE:3M-EQ', 'NSE:TATA-EQ', 'NSE:BHARTI-EQ', 'NSE:ESSAR-EQ', 'NSE:JAIPRAKASH-EQ', 'NSE:GAMMON-EQ', 'NSE:PUNJ-EQ', 'NSE:LANCO-EQ', 'NSE:GMR-EQ', 'NSE:GVK-EQ', 'NSE:SIMPLEX-EQ', 'NSE:EMKAY-EQ']
+
 
 MAX_SYMBOLS = len(STOCK_SYMBOLS)
 
 # =============================================================================
-# TELEGRAM HANDLER FOR AUTOMATED AUTHENTICATION
+# TELEGRAM HANDLER FOR DETECTOR AUTHENTICATION
 # =============================================================================
 
 class TelegramHandler:
@@ -1196,11 +1191,7 @@ class TelegramHandler:
                 "parse_mode": "HTML"
             }
             response = requests.post(url, data=data, timeout=10)
-            if response.status_code == 200:
-                return True
-            else:
-                print(f"Failed to send Telegram message: {response.text}")
-                return False
+            return response.status_code == 200
         except Exception as e:
             print(f"Error sending Telegram message: {e}")
             return False
@@ -1214,16 +1205,23 @@ class TelegramHandler:
                 "timeout": 30
             }
             response = requests.get(url, params=params, timeout=35)
+            
             if response.status_code == 200:
                 data = response.json()
                 if data.get("ok") and data.get("result"):
                     updates = data["result"]
                     if updates:
                         self.last_update_id = updates[-1]["update_id"]
+                        print(f"[TELEGRAM] Received {len(updates)} updates, last ID: {self.last_update_id}", flush=True)
                     return updates
+                else:
+                    print(f"[TELEGRAM] Response OK but no results: {data}", flush=True)
+            else:
+                print(f"[TELEGRAM] Bad response: {response.status_code}", flush=True)
+            
             return []
         except Exception as e:
-            print(f"Error getting Telegram updates: {e}")
+            print(f"[TELEGRAM] Error getting updates: {e}", flush=True)
             return []
     
     def extract_auth_code(self, message_text):
@@ -1244,7 +1242,6 @@ class TelegramHandler:
                 return auth_code
             
             print("No auth_code found in message")
-            print(f"Message content: {message_text[:100]}...")
             return None
         except Exception as e:
             print(f"Error extracting auth code: {e}")
@@ -1284,8 +1281,8 @@ class TelegramHandler:
                 time.sleep(TELEGRAM_POLLING_INTERVAL)
 
             except Exception as e:
-                print(f"Error while waiting for auth code: {e}")
-                time.sleep(TELEGRAM_POLLING_INTERVAL)
+                print(f"Telegram connection error: {e}")
+                time.sleep(10)
 
         return None
 
@@ -1294,7 +1291,54 @@ class TelegramHandler:
         self.url_send_count = 0
         self.current_auth_session_id = time.time()
         self.last_url_sent_time = 0
+    
+    def check_for_restart_command(self):
+        """Check for restart command in Telegram messages"""
+        try:
+            print("Checking Telegram for restart command...", flush=True)
+            updates = self.get_updates()
+            
+            for update in updates:
+                if "message" in update and "text" in update["message"]:
+                    message_text = update["message"]["text"].strip()
+                    print(f"Received message: '{message_text}'", flush=True)
+                    
+                    # Check various forms of restart command (case insensitive)
+                    if message_text.lower() in ["restart", "restart!", "restart.", "restart bot", "restart system", "reboot"]:
+                        print(f"Restart command received: '{message_text}'", flush=True)
+                        self.send_message("Restart command received! Initiating restart...")
+                        return True
+            
+            return False
+        except Exception as e:
+            print(f"Error checking for restart command: {e}", flush=True)
+            return False
 
+    def check_for_force_command(self):
+        """Check for Force command in Telegram messages"""
+        try:
+            print("Checking Telegram for force command...", flush=True)
+            updates = self.get_updates()
+            print(f"Got {len(updates)} Telegram updates", flush=True)
+            
+            for update in updates:
+                if "message" in update and "text" in update["message"]:
+                    message_text = update["message"]["text"].strip()
+                    print(f"Received message: '{message_text}'", flush=True)
+                    
+                    # Check various forms of force command (case insensitive)
+                    if message_text.lower() in ["force", "start", "start now"]:
+                        print(f"Force command detected: '{message_text}'", flush=True)
+                        self.send_message("Force command received! Starting detector immediately, bypassing market hours.")
+                        return True
+            
+            print("No force command found in messages", flush=True)
+            return False
+        except Exception as e:
+            print(f"Error checking for Force command: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            return False
 
 # =============================================================================
 # FYERS AUTHENTICATOR CLASS
@@ -1307,22 +1351,17 @@ class FyersAuthenticator:
         self.redirect_uri = FYERS_REDIRECT_URI
         self.totp_secret = FYERS_TOTP_SECRET
         self.pin = FYERS_PIN
-        self.access_token = FYERS_ACCESS_TOKEN
+        self.access_token = None
+        self.fyers_model = None
+        self.telegram = TelegramHandler()
         self.is_authenticated = False
-        self.telegram_handler = TelegramHandler()
         self.current_session = None
         self.current_auth_url = None
 
     def generate_totp(self):
         """Generate TOTP code"""
-        try:
-            totp = pyotp.TOTP(self.totp_secret)
-            totp_code = totp.now()
-            print(f"Generated TOTP: {totp_code}")
-            return totp_code
-        except Exception as e:
-            print(f"Error generating TOTP: {e}")
-            return None
+        totp = pyotp.TOTP(self.totp_secret)
+        return totp.now()
 
     def check_token_expiry_from_fyers(self):
         """Check if current token is valid by making an API call to Fyers"""
@@ -1342,6 +1381,7 @@ class FyersAuthenticator:
 
             if profile and profile.get('s') == 'ok':
                 print("Token is valid (verified from Fyers API)")
+                self.fyers_model = test_fyers
                 return True, "Token is valid"
             else:
                 error_msg = profile.get('message', 'Token validation failed')
@@ -1365,6 +1405,7 @@ class FyersAuthenticator:
             )
 
             self.current_auth_url = self.current_session.generate_authcode()
+            totp_code = self.generate_totp()
             print(f"\nAuthorization URL: {self.current_auth_url}\n")
 
             telegram_message = f"""<b>🔐 Fyers Authentication Required</b>
@@ -1373,97 +1414,103 @@ Please click the link below to authorize:
 
 {self.current_auth_url}
 
+<b>TOTP Code:</b> <code>{totp_code}</code>
+
 After authorizing, send the complete redirect URL here.
 
 <i>This URL will be resent every 5 minutes until authentication is successful.</i>
             """
 
-            self.telegram_handler.send_message(telegram_message)
-            self.telegram_handler.url_send_count += 1
-            self.telegram_handler.last_url_sent_time = time.time()
+            self.telegram.send_message(telegram_message)
+            self.telegram.url_send_count += 1
+            self.telegram.last_url_sent_time = time.time()
 
             return True
         except Exception as e:
             print(f"Error sending auth URL: {e}")
             return False
 
+    def save_token(self, token):
+        """Save token to global variables and JSON file"""
+        global FYERS_ACCESS_TOKEN, FYERS_TOKEN_TIMESTAMP, FYERS_TOKEN_CREATED_AT
+
+        FYERS_ACCESS_TOKEN = token
+        FYERS_TOKEN_TIMESTAMP = time.time()
+        FYERS_TOKEN_CREATED_AT = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        save_fyers_token_to_json(token, FYERS_TOKEN_TIMESTAMP, FYERS_TOKEN_CREATED_AT)
+
+        self.is_authenticated = True
+        print("Token updated and saved to JSON file")
+
     def authenticate(self):
         """Perform authentication with 5-minute retry and token expiry check"""
-        try:
-            print("="*50)
-            print("Starting Fyers Authentication")
-            print("="*50)
+        print("="*50, flush=True)
+        print("Starting Fyers Authentication", flush=True)
+        print("="*50, flush=True)
 
-            # First check if token is valid from JSON file timestamp
-            is_valid_timestamp, message = validate_fyers_token_from_json()
+        # First check if token is valid from JSON file timestamp
+        is_valid_timestamp, message = validate_fyers_token_from_json()
 
-            if is_valid_timestamp and FYERS_ACCESS_TOKEN:
-                self.access_token = FYERS_ACCESS_TOKEN
+        if is_valid_timestamp and FYERS_ACCESS_TOKEN:
+            self.access_token = FYERS_ACCESS_TOKEN
 
-                # Additionally verify token is actually valid with Fyers API
-                is_valid_fyers, fyers_message = self.check_token_expiry_from_fyers()
+            # Additionally verify token is actually valid with Fyers API
+            is_valid_fyers, fyers_message = self.check_token_expiry_from_fyers()
 
-                if is_valid_fyers:
-                    print("Using existing valid token (verified with Fyers)")
-                    self.is_authenticated = True
-                    return True
-                else:
-                    print(f"Token invalid from Fyers: {fyers_message}")
-                    # Token is expired according to Fyers, need fresh auth
-
-            print("Performing fresh authentication...")
-
-            # Reset auth session tracking
-            self.telegram_handler.reset_auth_session()
-
-            # Send initial auth URL
-            self.send_auth_url()
-
-            # Define callback to resend URL
-            def resend_url_callback():
-                print("Resending authentication URL...")
-                self.send_auth_url()
-
-            # Wait for auth code with 5-minute resend
-            auth_code = self.telegram_handler.wait_for_auth_code(
-                resend_callback=resend_url_callback
-            )
-
-            if not auth_code:
-                print("Failed to get auth code from Telegram")
-                return False
-
-            # Use the current session to generate token
-            self.current_session.set_token(auth_code)
-            response = self.current_session.generate_token()
-
-            if response and 'access_token' in response:
-                self.access_token = response['access_token']
+            if is_valid_fyers:
+                print("Using existing valid token (verified with Fyers)", flush=True)
                 self.is_authenticated = True
-
-                # Update the global token and save to JSON
-                global FYERS_ACCESS_TOKEN, FYERS_TOKEN_TIMESTAMP
-                FYERS_ACCESS_TOKEN = self.access_token
-                FYERS_TOKEN_TIMESTAMP = time.time()
-                save_fyers_token_to_json(self.access_token)
-
-                print("Authentication successful!")
-                print(f"Access Token: {self.access_token[:20]}...")
-
-                success_message = "<b>✅ Fyers Authentication Successful!</b>\n\nYou can now start monitoring."
-                self.telegram_handler.send_message(success_message)
-
                 return True
             else:
-                print(f"Authentication failed: {response}")
-                error_msg = response.get('message', 'Unknown error') if response else 'No response'
-                self.telegram_handler.send_message(f"<b>❌ Authentication Failed</b>\n\nError: {error_msg}\n\nPlease try again with a fresh URL.")
-                return False
+                print(f"Token invalid from Fyers: {fyers_message}", flush=True)
+                # Token is expired according to Fyers, need fresh auth
 
-        except Exception as e:
-            print(f"Error during authentication: {e}")
-            import traceback
-            traceback.print_exc()
+        print("Performing fresh authentication...", flush=True)
+
+        # Reset auth session tracking
+        self.telegram.reset_auth_session()
+
+        # Send initial auth URL
+        self.send_auth_url()
+
+        # Define callback to resend URL
+        def resend_url_callback():
+            print("Resending authentication URL...", flush=True)
+            self.send_auth_url()
+
+        # Wait for auth code with 5-minute resend
+        auth_code = self.telegram.wait_for_auth_code(
+            resend_callback=resend_url_callback
+        )
+
+        if not auth_code:
+            print("Failed to get auth code from Telegram", flush=True)
+            return False
+
+        # Use the current session to generate token
+        print("Auth code received, generating token...", flush=True)
+        self.current_session.set_token(auth_code)
+        response = self.current_session.generate_token()
+
+        if response and response.get('s') == 'ok':
+            self.access_token = response['access_token']
+            self.save_token(self.access_token)
+
+            self.fyers_model = fyersModel.FyersModel(
+                client_id=self.client_id,
+                token=self.access_token,
+                log_path=""
+            )
+
+            print("Authentication successful!", flush=True)
+            self.telegram.send_message("<b>✅ Fyers Authentication Successful!</b>\n\nYou can now start monitoring.")
+            self.is_authenticated = True
+            return True
+        else:
+            error_msg = response.get('message', 'Unknown error') if response else 'No response'
+            print(f"Authentication failed: {response}", flush=True)
+            self.telegram.send_message(f"<b>❌ Authentication Failed</b>\n\nError: {error_msg}\n\nPlease try again with a fresh URL.")
             return False
 
     def refresh_token_if_expired(self):
@@ -1472,8 +1519,8 @@ After authorizing, send the complete redirect URL here.
             is_valid, message = self.check_token_expiry_from_fyers()
 
             if not is_valid:
-                print(f"Token expired: {message}")
-                print("Initiating re-authentication...")
+                print(f"Token expired: {message}", flush=True)
+                print("Initiating re-authentication...", flush=True)
 
                 self.is_authenticated = False
                 self.access_token = None
@@ -1484,275 +1531,327 @@ After authorizing, send the complete redirect URL here.
             return True
 
         except Exception as e:
-            print(f"Error refreshing token: {e}")
+            print(f"Error refreshing token: {e}", flush=True)
             return False
 
-    def get_access_token(self):
-        """Get the access token, refreshing if needed"""
-        if not self.is_authenticated:
+    def get_fyers_model(self):
+        """Get Fyers model, refreshing token if needed"""
+        if not self.fyers_model:
             if not self.authenticate():
-                return None
+                raise Exception("Authentication failed")
         else:
             # Periodically verify token is still valid
             is_valid, _ = self.check_token_expiry_from_fyers()
             if not is_valid:
-                print("Token expired, re-authenticating...")
+                print("Token expired, re-authenticating...", flush=True)
                 self.is_authenticated = False
                 if not self.authenticate():
-                    return None
+                    raise Exception("Re-authentication failed")
 
-        return self.access_token
+        return self.fyers_model
 
 # =============================================================================
-# VOLUME SPIKE DETECTOR CLASS
+# GOOGLE SHEETS MANAGER
+# =============================================================================
+
+class GoogleSheetsManager:
+    def __init__(self, detector=None):
+        self.gc = None
+        self.worksheet = None
+        self.lock = threading.Lock()
+        self.detector = detector
+        self.sheets_initialized = self.initialize_sheets()
+        
+        if not self.sheets_initialized:
+            print("Google Sheets initialization failed")
+    
+    def initialize_sheets(self):
+        """Initialize Google Sheets connection"""
+        try:
+            if GOOGLE_CREDENTIALS is None:
+                print("Google credentials not available")
+                return False
+                
+            scope = [
+                "https://spreadsheets.google.com/feeds",
+                "https://www.googleapis.com/auth/drive"
+            ]
+            
+            creds = Credentials.from_service_account_info(GOOGLE_CREDENTIALS, scopes=scope)
+            self.gc = gspread.authorize(creds)
+            
+            try:
+                sheet = self.gc.open_by_key(GOOGLE_SHEETS_ID)
+                self.worksheet = sheet.sheet1
+                print(f"Connected to Google Sheet!")
+                
+                try:
+                    headers = self.worksheet.row_values(1)
+                    if not headers or len(headers) < 8:
+                        headers = [
+                            'Date', 'Time', 'Symbol', 'LTP', 'Volume_Spike',
+                            'Trd_Val_Cr', 'Spike_Type', 'Sector'
+                        ]
+                        self.worksheet.insert_row(headers, 1)
+                        print("Added headers to sheet")
+                except:
+                    headers = [
+                        'Date', 'Time', 'Symbol', 'LTP', 'Volume_Spike',
+                        'Trd_Val_Cr', 'Spike_Type', 'Sector'
+                    ]
+                    self.worksheet.append_row(headers)
+                
+            except gspread.SpreadsheetNotFound:
+                print(f"Could not access Google Sheet")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            print(f"Error initializing Google Sheets: {e}")
+            return False
+    
+    def add_trade_to_sheets(self, symbol, ltp, volume_spike, trade_value,
+                           spike_type, previous_volume, current_volume,
+                           previous_ltp=None, ltp_color_format=None):
+        """Add a new trade record to Google Sheets"""
+        try:
+            if self.worksheet is None:
+                return False
+                
+            with self.lock:
+                current_time = datetime.now()
+                sector = get_sector_for_symbol(symbol)
+                
+                row = [
+                    current_time.strftime('%Y-%m-%d'),
+                    current_time.strftime('%H:%M:%S'),
+                    symbol,
+                    round(ltp, 2),
+                    int(volume_spike),
+                    round(trade_value / 10000000, 2),
+                    spike_type,
+                    sector
+                ]
+                
+                self.worksheet.append_row(row)
+                print(f"Added to Google Sheets: {symbol} ({sector}) - Rs{trade_value/10000000:.2f} crore")
+                
+                return True
+                
+        except Exception as e:
+            print(f"Error adding to Google Sheets: {e}")
+            return False
+
+# =============================================================================
+# VOLUME SPIKE DETECTOR
 # =============================================================================
 
 class VolumeSpikeDetector:
     def __init__(self):
         self.authenticator = FyersAuthenticator()
-        self.fyers = None
-        self.worksheet = None
-        self.stop_event = threading.Event()
-        self.telegram_handler = TelegramHandler()
+        self.sheets_manager = GoogleSheetsManager(self)
+        self.access_token = None
+        self.fyers_ws = None
+        self.total_ticks = 0
+        self.individual_trades_detected = 0
+        self.start_time = time.time()
+        self.stop_event = None
+        
+        self.previous_volumes = {}
+        self.last_alert_time = {}
+        self.previous_ltp = {}
+        self.sector_counts = {}
+        
+        self.websocket_retry_count = 0
+        self.max_websocket_retries = 1
         
     def initialize(self):
-        """Initialize Fyers and Google Sheets connections"""
+        print("Initializing Volume Spike Detector...", flush=True)
+        
+        print("Attempting authentication...", flush=True)
+        if not self.authenticator.authenticate():
+            print("Authentication failed!", flush=True)
+            return False
+        
+        print("Authentication successful!", flush=True)
+        self.access_token = self.authenticator.access_token
+    
         try:
-            access_token = self.authenticator.get_access_token()
-            if not access_token:
-                print("Failed to get access token")
+            print("Getting Fyers model...", flush=True)
+            fyers = self.authenticator.get_fyers_model()
+            
+            print("Getting profile...", flush=True)
+            profile = fyers.get_profile()
+            
+            if profile['s'] == 'ok':
+                print(f"Connected! User: {profile['data']['name']}", flush=True)
+                return True
+            else:
+                print(f"Profile check failed: {profile}", flush=True)
                 return False
-            
-            self.fyers = fyersModel.FyersModel(
-                client_id=self.authenticator.client_id,
-                token=access_token,
-                log_path=""
-            )
-            
-            print("Fyers client initialized")
-            
-            if not self.initialize_sheets():
-                print("Failed to initialize Google Sheets")
-                return False
-            
-            return True
-            
         except Exception as e:
-            print(f"Error during initialization: {e}")
+            print(f"Connection error: {e}", flush=True)
             import traceback
             traceback.print_exc()
             return False
     
-    def initialize_sheets(self):
-        """Initialize Google Sheets connection"""
+    def on_tick_received(self, *args):
         try:
-            if not GOOGLE_CREDENTIALS:
-                print("Google Sheets credentials not available")
-                return False
+            message = args[-1] if args else None
             
-            scopes = ['https://www.googleapis.com/auth/spreadsheets']
-            creds = Credentials.from_service_account_info(GOOGLE_CREDENTIALS, scopes=scopes)
-            client = gspread.authorize(creds)
-            
-            spreadsheet = client.open_by_key(GOOGLE_SHEETS_ID)
-            self.worksheet = spreadsheet.sheet1
-            
-            headers = self.worksheet.row_values(1)
-            if not headers:
-                headers = ['Date', 'Time', 'Symbol', 'Sector', 'Volume', 'Price', 'Value (Rs Crores)', 'Type']
-                self.worksheet.append_row(headers)
-                print("Created new header row in Google Sheets")
-            
-            print("Google Sheets initialized successfully")
-            return True
-            
+            if isinstance(message, dict):
+                if message.get('type') in ['cn', 'ful', 'sub']:
+                    return
+                
+                if 'symbol' in message:
+                    self.detect_individual_trade(message)
+                        
         except Exception as e:
-            print(f"Error initializing Google Sheets: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+            print(f"Error in tick handler: {e}")
     
-    def add_to_sheet(self, data):
-        """Add data to Google Sheets"""
+    def detect_individual_trade(self, tick_data):
+        """Detect individual large trades"""
         try:
-            if not self.worksheet:
-                print("Worksheet not initialized")
-                return False
+            self.total_ticks += 1
             
-            row = [
-                data['date'],
-                data['time'],
-                data['symbol'],
-                data['sector'],
-                data['volume'],
-                f"{data['price']:.2f}",
-                f"{data['value_crores']:.2f}",
-                data['type']
-            ]
+            symbol = tick_data.get('symbol', '')
+            ltp = float(tick_data.get('ltp', 0))
+            current_volume = float(tick_data.get('vol_traded_today', 0))
             
-            self.worksheet.append_row(row)
-            print(f"Added to Google Sheets: {data['symbol']} - Rs{data['value_crores']:.2f} Cr")
-            return True
-            
-        except Exception as e:
-            print(f"Error adding to Google Sheets: {e}")
-            return False
-    
-    def send_telegram_alert(self, data):
-        """Send alert to Telegram"""
-        try:
-            message = f"""<b>Volume Spike Alert</b>
-
-<b>Symbol:</b> {data['symbol']}
-<b>Sector:</b> {data['sector']}
-<b>Volume:</b> {data['volume']:,}
-<b>Price:</b> Rs{data['price']:.2f}
-<b>Value:</b> Rs{data['value_crores']:.2f} Crores
-<b>Type:</b> {data['type']}
-<b>Time:</b> {data['time']}
-            """
-            
-            return self.telegram_handler.send_message(message)
-            
-        except Exception as e:
-            print(f"Error sending Telegram alert: {e}")
-            return False
-    
-    def on_message(self, message):
-        """Callback for WebSocket messages"""
-        try:
-            if check_market_end():
-                print("Market ended, stopping monitoring...")
-                self.stop_event.set()
+            if not symbol or ltp <= 0 or current_volume <= 0:
                 return
             
-            if isinstance(message, dict) and 'd' in message:
-                for trade in message['d']:
-                    if 'symbol' in trade and 'volume' in trade and 'ltp' in trade:
-                        symbol = trade['symbol']
-                        volume = trade['volume']
-                        price = trade['ltp']
-                        
-                        trade_value = volume * price
-                        
-                        if trade_value >= INDIVIDUAL_TRADE_THRESHOLD:
-                            value_crores = trade_value / 10000000
-                            sector = get_sector_for_symbol(symbol)
-                            
-                            now = datetime.now(ZoneInfo("Asia/Kolkata"))
-                            
-                            data = {
-                                'date': now.strftime("%d-%m-%Y"),
-                                'time': now.strftime("%H:%M:%S"),
-                                'symbol': symbol,
-                                'sector':sector,
-                                'volume': volume,
-                                'price': price,
-                                'value_crores': value_crores,
-                                'type': 'Individual Trade'
-                            }
-                            
-                            print(f"\n{'='*50}")
-                            print(f"VOLUME SPIKE DETECTED!")
-                            print(f"Symbol: {symbol}")
-                            print(f"Sector: {sector}")
-                            print(f"Volume: {volume:,}")
-                            print(f"Price: Rs{price:.2f}")
-                            print(f"Value: Rs{value_crores:.2f} Crores")
-                            print(f"{'='*50}\n")
-                            
-                            self.add_to_sheet(data)
-                            self.send_telegram_alert(data)
-                            
+            previous_volume = self.previous_volumes.get(symbol, current_volume)
+            previous_ltp = self.previous_ltp.get(symbol, None)
+            
+            volume_spike = current_volume - previous_volume
+            
+            self.previous_volumes[symbol] = current_volume
+            self.previous_ltp[symbol] = ltp
+            
+            if volume_spike <= MIN_VOLUME_SPIKE:
+                return
+            
+            individual_trade_value = ltp * volume_spike
+            
+            if individual_trade_value >= INDIVIDUAL_TRADE_THRESHOLD:
+                last_alert = self.last_alert_time.get(symbol, 0)
+                time_since_last = time.time() - last_alert
+                
+                if time_since_last > 60:
+                    self.individual_trades_detected += 1
+                    self.last_alert_time[symbol] = time.time()
+                    
+                    sector = get_sector_for_symbol(symbol)
+                    self.sector_counts[sector] = self.sector_counts.get(sector, 0) + 1
+                    
+                    spike_percentage = (volume_spike / previous_volume * 100) if previous_volume > 0 else 0
+                    if spike_percentage > 50:
+                        spike_type = "Large Spike"
+                    elif spike_percentage > 20:
+                        spike_type = "Medium Spike"
+                    else:
+                        spike_type = "Volume Increase"
+
+                    ltp_change = ltp - previous_ltp if previous_ltp else 0
+                    
+                    print(f"\nLARGE TRADE: {symbol} ({sector}) - Rs{individual_trade_value/10000000:.2f} Cr")
+                    
+                    self.sheets_manager.add_trade_to_sheets(
+                        symbol=symbol,
+                        ltp=ltp,
+                        volume_spike=volume_spike,
+                        trade_value=individual_trade_value,
+                        spike_type=spike_type,
+                        previous_volume=previous_volume,
+                        current_volume=current_volume,
+                        previous_ltp=previous_ltp
+                    )
+                    
+                    telegram_alert = f"""
+<b>🚨 LARGE TRADE DETECTED</b>
+
+<b>Symbol:</b> {symbol}
+<b>Sector:</b> {sector}
+<b>LTP:</b> Rs{ltp:,.2f}
+<b>Volume:</b> {volume_spike:,.0f}
+<b>Value:</b> Rs{individual_trade_value/10000000:.2f} Cr
+<b>Time:</b> {datetime.now().strftime('%H:%M:%S')}
+                    """
+                    self.authenticator.telegram.send_message(telegram_alert)
+                
         except Exception as e:
-            print(f"Error processing message: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    def on_error(self, error):
-        """Callback for WebSocket errors"""
-        print(f"WebSocket Error: {error}")
-    
-    def on_close(self):
-        """Callback for WebSocket close"""
-        print("WebSocket connection closed")
-    
-    def on_open(self):
-        """Callback for WebSocket open"""
-        print("WebSocket connection opened")
-        
-        data_type = "symbolData"
-        symbols = STOCK_SYMBOLS[:MAX_SYMBOLS]
-        
-        print(f"Subscribing to {len(symbols)} symbols...")
-        
-        self.fyers_ws.subscribe(symbols=symbols, data_type=data_type)
-        
-        print("Subscription successful!")
-        print(f"Monitoring {len(symbols)} stocks for volume spikes...")
-        print(f"Threshold: Rs{INDIVIDUAL_TRADE_THRESHOLD/10000000:.2f} Crores")
+            print(f"Error detecting trade: {e}")
     
     def start_monitoring(self):
-        """Start monitoring stocks"""
+        """Start monitoring"""
         try:
-            wait_for_market_start()
-            
-            print("\nStarting Volume Spike Detector...")
-            print(f"Market Hours: {MARKET_START_TIME} - {MARKET_END_TIME}")
-            print(f"Individual Trade Threshold: Rs{INDIVIDUAL_TRADE_THRESHOLD/10000000:.2f} Crores")
-            print(f"Monitoring {MAX_SYMBOLS} symbols")
-            
-            access_token = f"{self.authenticator.client_id}:{self.authenticator.access_token}"
-            
+            print("Creating WebSocket connection...")
             self.fyers_ws = data_ws.FyersDataSocket(
-                access_token=access_token,
+                access_token=f"{FYERS_CLIENT_ID}:{self.access_token}",
                 log_path="",
                 litemode=False,
                 write_to_file=False,
                 reconnect=True,
-                on_connect=self.on_open,
-                on_close=self.on_close,
-                on_error=self.on_error,
-                on_message=self.on_message
+                on_message=self.on_tick_received
             )
             
+            symbols_to_monitor = STOCK_SYMBOLS[:MAX_SYMBOLS]
+            print(f"Subscribing to {len(symbols_to_monitor)} symbols...")
+            
             self.fyers_ws.connect()
+            time.sleep(3)
+            self.fyers_ws.subscribe(symbols=symbols_to_monitor, data_type="SymbolUpdate")
             
-            while not self.stop_event.is_set():
-                if check_market_end():
-                    print("Market hours ended, stopping monitoring...")
+            print("Monitoring started")
+            
+            while True:
+                if self.stop_event and self.stop_event.is_set():
                     break
-                time.sleep(1)
-            
-            print("Closing WebSocket connection...")
-            self.fyers_ws.close()
-            
+                time.sleep(5)
+                
         except Exception as e:
-            print(f"Error in monitoring: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Monitoring error: {e}")
+            raise
+        finally:
+            if self.fyers_ws:
+                try:
+                    self.fyers_ws.close_connection()
+                except:
+                    pass
 
 # =============================================================================
 # MAIN EXECUTION
 # =============================================================================
 
-def start_all_services():
-    """Start the volume detector service"""
-    print("Starting volume spike detector...")
-    supervisor_loop()
-
 if __name__ == "__main__":
-    try:
-        print("="*50)
-        print("Fyers Volume Spike Detector")
-        print("="*50)
+    import sys
 
-        start_all_services()
+    # Flush output immediately for better logging
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+
+    try:
+        print("="*70, flush=True)
+        print("Fyers Volume Spike Detector", flush=True)
+        print("="*70, flush=True)
+
+        print("\nCommands available:", flush=True)
+        print("   Detector Bot: 'force' or 'restart'", flush=True)
+        print("\nSupervisor will check for commands every 10 seconds", flush=True)
+        print("="*70, flush=True)
+
+        print("\nStarting supervisor loop...", flush=True)
+        supervisor_loop()
 
     except KeyboardInterrupt:
-        print("\nShutting down gracefully...")
+        print("\nShutting down...", flush=True)
         _stop_stream_once()
+        sys.exit(0)
     except Exception as e:
-        print(f"\nFatal error: {e}")
+        print(f"Fatal error: {e}", flush=True)
         import traceback
         traceback.print_exc()
+        _stop_stream_once()
+        sys.exit(1)
