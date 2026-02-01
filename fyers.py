@@ -289,11 +289,9 @@ TELEGRAM_CHAT_ID = "5715256800"
 TELEGRAM_POLLING_INTERVAL = 5
 TELEGRAM_AUTH_TIMEOUT = 300
 
-# Summary Telegram Bot Configuration
-SUMMARY_TELEGRAM_BOT_TOKEN = "8490433133:AAEvchBW14co_Obtr8FPl_Nqg3LzqahEuNM"
-SUMMARY_TELEGRAM_CHAT_ID = "8388919023"
-SUMMARY_SEND_TIME = "16:30"  # 4:30 PM IST
-SUMMARY_SEND_INTERVAL = 7200  # 2 hours in seconds
+# Login URL Retry Configuration
+LOGIN_URL_RETRY_INTERVAL = 300  # 5 minutes in seconds
+LOGIN_URL_SENT_FLAG = False  # Track if URL was already sent in current auth attempt
 
 # Scheduling Configuration
 MARKET_START_TIME = "09:13"
@@ -1184,6 +1182,9 @@ class TelegramHandler:
         self.chat_id = TELEGRAM_CHAT_ID
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
         self.last_update_id = 0
+        self.last_url_sent_time = 0  # Track when URL was last sent
+        self.url_send_count = 0  # Track how many times URL was sent in current session
+        self.current_auth_session_id = None  # Unique ID for current auth session
         
     def send_message(self, message):
         """Send a message to Telegram"""
@@ -1249,611 +1250,51 @@ class TelegramHandler:
             print(f"Error extracting auth code: {e}")
             return None
     
-    def wait_for_auth_code(self, timeout_seconds=TELEGRAM_AUTH_TIMEOUT):
-        """Wait for auth code message from Telegram with network error handling"""
-        print(f"Waiting for auth code from Telegram (timeout: {timeout_seconds}s)...")
+    def wait_for_auth_code(self, timeout_seconds=TELEGRAM_AUTH_TIMEOUT, auth_url=None, resend_callback=None):
+        """Wait for auth code message from Telegram with 5-minute URL retry"""
+        print(f"Waiting for auth code from Telegram (will resend URL every 5 minutes)...")
         start_time = time.time()
-        
-        while time.time() - start_time < timeout_seconds:
+        last_url_resend = time.time()
+
+        # Continue indefinitely until auth is successful (no timeout for retries)
+        while True:
             try:
+                current_time = time.time()
+
+                # Resend URL every 5 minutes if not authenticated
+                if current_time - last_url_resend >= LOGIN_URL_RETRY_INTERVAL:
+                    print(f"5 minutes elapsed, resending login URL...")
+                    if resend_callback:
+                        resend_callback()
+                    last_url_resend = current_time
+
                 updates = self.get_updates()
-                
+
                 for update in updates:
                     if "message" in update and "text" in update["message"]:
                         message_text = update["message"]["text"]
-                        
+
                         if "auth_code=" in message_text:
                             auth_code = self.extract_auth_code(message_text)
                             if auth_code:
                                 print("Auth code received successfully!")
+                                self.url_send_count = 0  # Reset counter on success
                                 return auth_code
-                
+
                 time.sleep(TELEGRAM_POLLING_INTERVAL)
-                
+
             except Exception as e:
                 print(f"Error while waiting for auth code: {e}")
                 time.sleep(TELEGRAM_POLLING_INTERVAL)
-        
-        print("Timeout waiting for auth code")
+
         return None
 
-# =============================================================================
-# SUMMARY TELEGRAM HANDLER
-# =============================================================================
+    def reset_auth_session(self):
+        """Reset auth session tracking for new authentication attempt"""
+        self.url_send_count = 0
+        self.current_auth_session_id = time.time()
+        self.last_url_sent_time = 0
 
-class SummaryTelegramHandler:
-    def __init__(self):
-        self.bot_token = SUMMARY_TELEGRAM_BOT_TOKEN
-        self.chat_id = SUMMARY_TELEGRAM_CHAT_ID
-        self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
-        self.last_update_id = 0
-        self.stop_sending_today = False
-        
-    def send_message(self, message):
-        """Send a message to Telegram"""
-        try:
-            url = f"{self.base_url}/sendMessage"
-            data = {
-                "chat_id": self.chat_id,
-                "text": message,
-                "parse_mode": "HTML"
-            }
-            response = requests.post(url, data=data, timeout=10)
-            if response.status_code == 200:
-                print("Summary message sent successfully")
-                return True
-            else:
-                print(f"Failed to send summary message: {response.text}")
-                return False
-        except Exception as e:
-            print(f"Error sending summary message: {e}")
-            return False
-    
-    def get_updates(self):
-        """Get latest messages from Telegram"""
-        try:
-            url = f"{self.base_url}/getUpdates"
-            params = {
-                "offset": self.last_update_id + 1,
-                "timeout": 10
-            }
-            response = requests.get(url, params=params, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                if data.get("ok") and data.get("result"):
-                    updates = data["result"]
-                    if updates:
-                        self.last_update_id = updates[-1]["update_id"]
-                    return updates
-            return []
-        except Exception as e:
-            print(f"Error getting Telegram updates: {e}")
-            return []
-    
-    def check_for_done_message(self):
-        """Check if 'done' message has been received"""
-        try:
-            updates = self.get_updates()
-            for update in updates:
-                if "message" in update and "text" in update["message"]:
-                    text = update["message"]["text"].strip().lower()
-                    if text == "done":
-                        print("'Done' message received - stopping summaries for today")
-                        self.stop_sending_today = True
-                        return True
-            return False
-        except Exception as e:
-            print(f"Error checking for done message: {e}")
-            return False
-    
-    def check_for_send_message(self):
-        """Check if 'send' message has been received"""
-        try:
-            updates = self.get_updates()
-            for update in updates:
-                if "message" in update and "text" in update["message"]:
-                    text = update["message"]["text"].strip().lower()
-                    if text == "send":
-                        print("'Send' message received - will send immediate summary")
-                        return True
-            return False
-        except Exception as e:
-            print(f"Error checking for send message: {e}")
-            return False
-
-# =============================================================================
-# GOOGLE SHEETS SUMMARY EXTRACTOR
-# =============================================================================
-
-class DailySummaryGenerator:
-    def __init__(self):
-        self.sheets_id = GOOGLE_SHEETS_ID
-        self.credentials = GOOGLE_CREDENTIALS
-        self.worksheet = None
-        
-    def initialize_sheets(self):
-        """Initialize Google Sheets connection"""
-        try:
-            if not self.credentials:
-                print("Google Sheets credentials not available")
-                return False
-            
-            scopes = ['https://www.googleapis.com/auth/spreadsheets']
-            creds = Credentials.from_service_account_info(self.credentials, scopes=scopes)
-            client = gspread.authorize(creds)
-            
-            spreadsheet = client.open_by_key(self.sheets_id)
-            self.worksheet = spreadsheet.sheet1
-            
-            print("Google Sheets initialized for summary")
-            return True
-        except Exception as e:
-            print(f"Error initializing sheets for summary: {e}")
-            return False
-    
-    def get_today_data(self):
-        """Get all data for today's date from Google Sheets"""
-        try:
-            if not self.worksheet:
-                if not self.initialize_sheets():
-                    return []
-            
-            # Get current date in multiple formats
-            now = datetime.now(ZoneInfo("Asia/Kolkata"))
-            today_formats = [
-                now.strftime("%d-%m-%Y"),    # 15-10-2025
-                now.strftime("%Y-%m-%d"),    # 2025-10-15
-                now.strftime("%d/%m/%Y"),    # 15/10/2025
-                now.strftime("%m/%d/%Y"),    # 10/15/2025
-                now.strftime("%d-%m-%y"),    # 15-10-25
-            ]
-            
-            # Get all values including headers
-            all_values = self.worksheet.get_all_values()
-            
-            if not all_values or len(all_values) < 2:
-                print("No data in sheet")
-                return []
-            
-            # First row is headers
-            headers = all_values[0]
-            print(f"Sheet headers: {headers}")
-            
-            # Find column indices
-            date_col_idx = None
-            symbol_col_idx = None
-            value_col_idx = None
-            
-            for idx, header in enumerate(headers):
-                header_lower = header.lower().strip()
-                
-                # Match Date column
-                if header_lower == 'date':
-                    date_col_idx = idx
-                    print(f"OK Found Date column at index {idx}")
-                
-                # Match Symbol column
-                elif header_lower == 'symbol':
-                    symbol_col_idx = idx
-                    print(f"OK Found Symbol column at index {idx}")
-                
-                # Match Value column - looking for Trd_Val_Cr or similar
-                elif ('trd' in header_lower and 'val' in header_lower and 'cr' in header_lower) or \
-                     ('value' in header_lower and ('cr' in header_lower or 'crore' in header_lower)):
-                    value_col_idx = idx
-                    print(f"OK Found Value column at index {idx}: '{header}'")
-            
-            if date_col_idx is None or symbol_col_idx is None or value_col_idx is None:
-                print(f"ERROR Required columns not found!")
-                print(f"   Date column index: {date_col_idx}")
-                print(f"   Symbol column index: {symbol_col_idx}")
-                print(f"   Value column index: {value_col_idx}")
-                print(f"\nINFO Looking for columns named:")
-                print(f"   - 'Date' (exact match)")
-                print(f"   - 'Symbol' (exact match)")
-                print(f"   - 'Trd_Val_Cr' or 'Value (Rs Crores)' or similar")
-                return []
-            
-            print(f"\nOK All required columns found!")
-            print(f"  Date: column {date_col_idx}")
-            print(f"  Symbol: column {symbol_col_idx}")
-            print(f"  Value: column {value_col_idx} ('{headers[value_col_idx]}')")
-            
-            # Process data rows
-            today_records = []
-            
-            for row_idx, row in enumerate(all_values[1:], start=2):  # Skip header row
-                if len(row) <= max(date_col_idx, symbol_col_idx, value_col_idx):
-                    continue
-                
-                date_value = str(row[date_col_idx]).strip()
-                
-                # Check if date matches today
-                is_today = False
-                for date_format in today_formats:
-                    if date_value == date_format or date_value.startswith(date_format):
-                        is_today = True
-                        break
-                
-                if is_today:
-                    symbol = str(row[symbol_col_idx]).strip()
-                    value_str = str(row[value_col_idx]).strip()
-                    
-                    record = {
-                        'Date': date_value,
-                        'Symbol': symbol,
-                        'Trd_Val_Cr': value_str
-                    }
-                    today_records.append(record)
-            
-            print(f"\nData Summary:")
-            print(f"   Total rows in sheet: {len(all_values) - 1}")
-            print(f"   Records for today ({today_formats[0]}): {len(today_records)}")
-            
-            # Debug: Print first few records
-            if today_records:
-                print(f"\nSample records (first 3):")
-                for i, record in enumerate(today_records[:3], 1):
-                    print(f"   {i}. {record['Date']} | {record['Symbol']:20s} | Rs.{record['Trd_Val_Cr']} Cr")
-            else:
-                print(f"\nWARNING No records found for today's date: {today_formats[0]}")
-                print(f"   Sample dates in sheet:")
-                for row in all_values[1:6]:  # Show first 5 dates
-                    if len(row) > date_col_idx:
-                        print(f"   - {row[date_col_idx]}")
-            
-            return today_records
-            
-        except Exception as e:
-            print(f"ERROR getting today's data: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
-    
-    def get_date_range_data(self, days_back=0):
-        """Get data for a specific date range"""
-        try:
-            if not self.worksheet:
-                if not self.initialize_sheets():
-                    return []
-            
-            # Calculate target dates
-            now = datetime.now(ZoneInfo("Asia/Kolkata"))
-            target_dates = []
-            
-            for i in range(days_back + 1):
-                target_date = now - timedelta(days=i)
-                date_formats = [
-                    target_date.strftime("%d-%m-%Y"),    # 15-10-2025
-                    target_date.strftime("%Y-%m-%d"),    # 2025-10-15
-                    target_date.strftime("%d/%m/%Y"),    # 15/10/2025
-                    target_date.strftime("%m/%d/%Y"),    # 10/15/2025
-                    target_date.strftime("%d-%m-%y"),    # 15-10-25
-                ]
-                target_dates.extend(date_formats)
-            
-            # Get all values including headers
-            all_values = self.worksheet.get_all_values()
-            
-            if not all_values or len(all_values) < 2:
-                print("No data in sheet")
-                return []
-            
-            # First row is headers
-            headers = all_values[0]
-            
-            # Find column indices (same logic as get_today_data)
-            date_col_idx = None
-            symbol_col_idx = None
-            value_col_idx = None
-            
-            for idx, header in enumerate(headers):
-                header_lower = header.lower().strip()
-                
-                if header_lower == 'date':
-                    date_col_idx = idx
-                elif header_lower == 'symbol':
-                    symbol_col_idx = idx
-                elif ('trd' in header_lower and 'val' in header_lower and 'cr' in header_lower) or \
-                     ('value' in header_lower and ('cr' in header_lower or 'crore' in header_lower)):
-                    value_col_idx = idx
-            
-            if date_col_idx is None or symbol_col_idx is None or value_col_idx is None:
-                print(f"ERROR Required columns not found for date range!")
-                return []
-            
-            # Process data rows
-            date_range_records = []
-            
-            for row_idx, row in enumerate(all_values[1:], start=2):
-                if len(row) > max(date_col_idx, symbol_col_idx, value_col_idx):
-                    date_val = row[date_col_idx].strip()
-                    symbol_val = row[symbol_col_idx].strip()
-                    value_val = row[value_col_idx].strip()
-                    
-                    if date_val in target_dates and symbol_val and value_val:
-                        try:
-                            trd_val_cr = float(value_val.replace(',', '')) if value_val else 0.0
-                            record = {
-                                'Date': date_val,
-                                'Symbol': symbol_val,
-                                'Trd_Val_Cr': trd_val_cr
-                            }
-                            date_range_records.append(record)
-                        except ValueError:
-                            continue
-            
-            return date_range_records
-            
-        except Exception as e:
-            print(f"ERROR getting date range data: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
-    
-    def generate_top_15_summary(self, days_back=0, summary_type="Daily"):
-        """Generate top 15 stocks summary based on count and total value"""
-        try:
-            print("\n" + "="*70)
-            print(f"GENERATING TOP 15 {summary_type.upper()} SUMMARY")
-            print("="*70)
-            
-            # Step 1: Get records based on date range
-            if days_back == 0:
-                records = self.get_today_data()
-            else:
-                records = self.get_date_range_data(days_back)
-            
-            if not records:
-                print(f"ERROR No records found for {summary_type.lower()} - cannot generate summary")
-                return None
-            
-            print(f"\nOK Processing {len(records)} records for {summary_type.lower()} summary...")
-            
-            # Step 2: Process each record
-            symbol_stats = {}
-            parse_success = 0
-            parse_failed = 0
-            
-            for record in records:
-                # Get symbol
-                symbol = record.get('Symbol', '').strip()
-                
-                # Get trade value
-                value_str = str(record.get('Trd_Val_Cr', '0')).strip()
-                
-                # Skip if symbol is empty or invalid
-                if not symbol or symbol == 'Unknown' or symbol == '':
-                    continue
-                
-                # Parse the trade value
-                try:
-                    # Remove any non-numeric characters except decimal point and minus sign
-                    value_clean = re.sub(r'[^\d.\-]', '', value_str)
-                    trd_val = float(value_clean) if value_clean and value_clean != '-' else 0.0
-                    
-                    if trd_val > 0:
-                        parse_success += 1
-                        if parse_success <= 5:  # Show first 5 successful parses
-                            print(f"   OK {symbol:20s}: '{value_str}' -> {trd_val:.2f} Cr")
-                except (ValueError, AttributeError) as e:
-                    trd_val = 0.0
-                    parse_failed += 1
-                    if parse_failed <= 3:  # Show first 3 failures
-                        print(f"   ERROR {symbol:20s}: Failed to parse '{value_str}'")
-                
-                # Initialize or update symbol stats
-                if symbol not in symbol_stats:
-                    symbol_stats[symbol] = {
-                        'count': 0,
-                        'total_trd_val_cr': 0.0
-                    }
-                
-                # Increment count
-                symbol_stats[symbol]['count'] += 1
-                
-                # Add to total value
-                symbol_stats[symbol]['total_trd_val_cr'] += trd_val
-            
-            print(f"\nParsing Results:")
-            print(f"   OK Successfully parsed: {parse_success}")
-            print(f"   ERROR Failed to parse: {parse_failed}")
-            print(f"   INFO Unique symbols: {len(symbol_stats)}")
-            
-            # Step 3: Sort by count and get top 15
-            sorted_symbols = sorted(
-                symbol_stats.items(),
-                key=lambda x: x[1]['count'],
-                reverse=True
-            )
-            
-            top_15 = sorted_symbols[:15]
-            
-            print(f"\n{'='*70}")
-            print("TOP 15 SYMBOLS BY COUNT")
-            print(f"{'='*70}")
-            print(f"{'Rank':<6} {'Symbol':<20} {'Count':<8} {'Total Value (Cr)':<18} {'Avg/Trade (Cr)'}")
-            print("-"*70)
-            
-            for i, (symbol, stats) in enumerate(top_15, 1):
-                count = stats['count']
-                total_val = stats['total_trd_val_cr']
-                avg_val = total_val / count if count > 0 else 0
-                
-                print(f"{i:2d}.   {symbol:<20} {count:<8} Rs.{total_val:>15,.2f}  Rs.{avg_val:>10,.2f}")
-            
-            print("="*70 + "\n")
-            
-            return top_15, len(records), len(symbol_stats)
-            
-        except Exception as e:
-            print(f"ERROR generating summary: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def format_single_summary_message(self, days_back=0, summary_type="Daily"):
-        """Format a single summary message for Telegram"""
-        try:
-            result = self.generate_top_15_summary(days_back, summary_type)
-            
-            if not result:
-                return f"No volume spike data available for {summary_type.lower()}'s summary"
-            
-            top_15, total_records, unique_symbols = result
-            
-            # Get date range info
-            now = datetime.now(ZoneInfo("Asia/Kolkata"))
-            if days_back == 0:
-                date_info = now.strftime("%d-%m-%Y")
-            else:
-                end_date = now
-                start_date = now - timedelta(days=days_back)
-                date_info = f"{start_date.strftime('%d-%m-%Y')} to {end_date.strftime('%d-%m-%Y')}"
-            
-            # Calculate total value across top 15 stocks
-            total_top15_value = sum(stats['total_trd_val_cr'] for _, stats in top_15)
-            
-            message = f"""<b>{summary_type} Volume Spike Summary</b>
-Date: {date_info}
-Total Records: {total_records}
-Unique Symbols: {unique_symbols}
-Top 15 Total Value: Rs.{total_top15_value:,.2f} Cr
-
-<b>TOP 15 RANKINGS (by Count):</b>
-
-"""
-            
-            for idx, (symbol, stats) in enumerate(top_15, 1):
-                count = stats['count']
-                total_trd_val_cr = stats['total_trd_val_cr']
-                avg_per_trade = total_trd_val_cr / count if count > 0 else 0
-                
-                message += f"""{idx}. <b>{symbol}</b>
-   Count: <b>{count}</b> trades
-   Total Value: Rs.{total_trd_val_cr:,.2f} Cr
-   Avg per Trade: Rs.{avg_per_trade:.2f} Cr
-   
-"""
-            
-            message += f"""====================
-<i>Analysis Complete for {date_info}</i>
-<i>Ranked by highest trade count</i>
-<i>Values from Trd_Val_Cr column</i>
-
-Reply 'send' for fresh summary or 'done' to stop
-"""
-            
-            return message
-            
-        except Exception as e:
-            print(f"ERROR formatting {summary_type.lower()} summary message: {e}")
-            import traceback
-            traceback.print_exc()
-            return f"ERROR generating {summary_type.lower()} summary: {str(e)}"
-    
-    def format_summary_message(self):
-        """Format the summary message for Telegram with day-specific logic"""
-        try:
-            now = datetime.now(ZoneInfo("Asia/Kolkata"))
-            current_day = now.strftime("%A")  # Monday, Tuesday, etc.
-            
-            print(f"Today is {current_day} - determining summary types...")
-            
-            messages = []
-            
-            # Always send daily summary
-            print("Generating daily summary...")
-            daily_summary = self.format_single_summary_message(0, "Daily")
-            messages.append(daily_summary)
-            
-            # Wednesday and Friday: Add 3-day summary
-            if current_day in ["Wednesday", "Friday"]:
-                print("Generating 3-day summary...")
-                three_day_summary = self.format_single_summary_message(2, "3-Day")
-                messages.append(three_day_summary)
-            
-            # Friday only: Add weekly summary
-            if current_day == "Friday":
-                print("Generating weekly summary...")
-                weekly_summary = self.format_single_summary_message(4, "Weekly")
-                messages.append(weekly_summary)
-            
-            print(f"Generated {len(messages)} summary types")
-            
-            # Join all messages with separators
-            separator = "\n\n" + "="*50 + "\n\n"
-            combined_message = separator.join(messages)
-            
-            return combined_message
-            
-        except Exception as e:
-            print(f"ERROR formatting summary message: {e}")
-            import traceback
-            traceback.print_exc()
-            return f"ERROR generating summary: {str(e)}"
-
-# =============================================================================
-# SUMMARY SCHEDULER
-# =============================================================================
-
-def summary_scheduler():
-    """Background thread to handle summary sending"""
-    print("Summary scheduler started")
-    
-    summary_handler = SummaryTelegramHandler()
-    summary_generator = DailySummaryGenerator()
-    
-    last_sent_date = None
-    last_sent_time = None
-    
-    while True:
-        try:
-            now = datetime.now(ZoneInfo("Asia/Kolkata"))
-            current_date = now.strftime("%d-%m-%Y")
-            current_time = now.strftime("%H:%M")
-            
-            if last_sent_date != current_date:
-                summary_handler.stop_sending_today = False
-                last_sent_date = current_date
-                last_sent_time = None
-                print(f"New day started: {current_date}")
-            
-            summary_handler.check_for_done_message()
-            
-            if (current_time >= SUMMARY_SEND_TIME and 
-                not summary_handler.stop_sending_today):
-                
-                should_send = False
-                
-                if last_sent_time is None:
-                    should_send = True
-                else:
-                    last_dt = datetime.strptime(f"{current_date} {last_sent_time}", "%d-%m-%Y %H:%M")
-                    current_dt = datetime.strptime(f"{current_date} {current_time}", "%d-%m-%Y %H:%M")
-                    time_diff = (current_dt - last_dt).total_seconds()
-                    
-                    if time_diff >= SUMMARY_SEND_INTERVAL:
-                        should_send = True
-                
-                if should_send:
-                    print(f"Sending summary at {current_time}")
-                    
-                    summary_message = summary_generator.format_summary_message()
-                    
-                    if summary_handler.send_message(summary_message):
-                        last_sent_time = current_time
-                        print(f"Summary sent successfully at {current_time}")
-                    else:
-                        print(f"Failed to send summary at {current_time}")
-            
-            time.sleep(60)
-            
-        except Exception as e:
-            print(f"Error in summary scheduler: {e}")
-            import traceback
-            traceback.print_exc()
-            time.sleep(60)
 
 # =============================================================================
 # FYERS AUTHENTICATOR CLASS
@@ -1869,7 +1310,9 @@ class FyersAuthenticator:
         self.access_token = FYERS_ACCESS_TOKEN
         self.is_authenticated = False
         self.telegram_handler = TelegramHandler()
-        
+        self.current_session = None
+        self.current_auth_url = None
+
     def generate_totp(self):
         """Generate TOTP code"""
         try:
@@ -1880,82 +1323,184 @@ class FyersAuthenticator:
         except Exception as e:
             print(f"Error generating TOTP: {e}")
             return None
-    
-    def authenticate(self):
-        """Perform fresh authentication"""
+
+    def check_token_expiry_from_fyers(self):
+        """Check if current token is valid by making an API call to Fyers"""
         try:
-            print("="*50)
-            print("Starting Fyers Authentication")
-            print("="*50)
-            
-            is_valid, message = validate_fyers_token_from_json()
-            if is_valid and FYERS_ACCESS_TOKEN:
-                print("Using existing valid token from JSON file")
-                self.access_token = FYERS_ACCESS_TOKEN
-                self.is_authenticated = True
-                return True
-            
-            print("Performing fresh authentication...")
-            
-            session = fyersModel.SessionModel(
+            if not self.access_token:
+                return False, "No token available"
+
+            # Create temporary Fyers model to test token
+            test_fyers = fyersModel.FyersModel(
+                client_id=self.client_id,
+                token=self.access_token,
+                log_path=""
+            )
+
+            # Make a profile API call to check if token is valid
+            profile = test_fyers.get_profile()
+
+            if profile and profile.get('s') == 'ok':
+                print("Token is valid (verified from Fyers API)")
+                return True, "Token is valid"
+            else:
+                error_msg = profile.get('message', 'Token validation failed')
+                print(f"Token expired or invalid: {error_msg}")
+                return False, f"Token expired: {error_msg}"
+
+        except Exception as e:
+            print(f"Error checking token with Fyers: {e}")
+            return False, f"Token check failed: {str(e)}"
+
+    def send_auth_url(self):
+        """Send authentication URL to Telegram"""
+        try:
+            # Create new session for fresh URL
+            self.current_session = fyersModel.SessionModel(
                 client_id=self.client_id,
                 secret_key=self.secret_key,
                 redirect_uri=self.redirect_uri,
                 response_type="code",
                 grant_type="authorization_code"
             )
-            
-            auth_url = session.generate_authcode()
-            print(f"\nAuthorization URL: {auth_url}\n")
-            
-            telegram_message = f"""<b>Fyers Authentication Required</b>
+
+            self.current_auth_url = self.current_session.generate_authcode()
+            print(f"\nAuthorization URL: {self.current_auth_url}\n")
+
+            telegram_message = f"""<b>🔐 Fyers Authentication Required</b>
 
 Please click the link below to authorize:
 
-{auth_url}
+{self.current_auth_url}
 
 After authorizing, send the complete redirect URL here.
+
+<i>This URL will be resent every 5 minutes until authentication is successful.</i>
             """
-            
+
             self.telegram_handler.send_message(telegram_message)
-            
-            auth_code = self.telegram_handler.wait_for_auth_code()
-            
+            self.telegram_handler.url_send_count += 1
+            self.telegram_handler.last_url_sent_time = time.time()
+
+            return True
+        except Exception as e:
+            print(f"Error sending auth URL: {e}")
+            return False
+
+    def authenticate(self):
+        """Perform authentication with 5-minute retry and token expiry check"""
+        try:
+            print("="*50)
+            print("Starting Fyers Authentication")
+            print("="*50)
+
+            # First check if token is valid from JSON file timestamp
+            is_valid_timestamp, message = validate_fyers_token_from_json()
+
+            if is_valid_timestamp and FYERS_ACCESS_TOKEN:
+                self.access_token = FYERS_ACCESS_TOKEN
+
+                # Additionally verify token is actually valid with Fyers API
+                is_valid_fyers, fyers_message = self.check_token_expiry_from_fyers()
+
+                if is_valid_fyers:
+                    print("Using existing valid token (verified with Fyers)")
+                    self.is_authenticated = True
+                    return True
+                else:
+                    print(f"Token invalid from Fyers: {fyers_message}")
+                    # Token is expired according to Fyers, need fresh auth
+
+            print("Performing fresh authentication...")
+
+            # Reset auth session tracking
+            self.telegram_handler.reset_auth_session()
+
+            # Send initial auth URL
+            self.send_auth_url()
+
+            # Define callback to resend URL
+            def resend_url_callback():
+                print("Resending authentication URL...")
+                self.send_auth_url()
+
+            # Wait for auth code with 5-minute resend
+            auth_code = self.telegram_handler.wait_for_auth_code(
+                resend_callback=resend_url_callback
+            )
+
             if not auth_code:
                 print("Failed to get auth code from Telegram")
                 return False
-            
-            session.set_token(auth_code)
-            response = session.generate_token()
-            
+
+            # Use the current session to generate token
+            self.current_session.set_token(auth_code)
+            response = self.current_session.generate_token()
+
             if response and 'access_token' in response:
                 self.access_token = response['access_token']
                 self.is_authenticated = True
-                
+
+                # Update the global token and save to JSON
+                global FYERS_ACCESS_TOKEN, FYERS_TOKEN_TIMESTAMP
+                FYERS_ACCESS_TOKEN = self.access_token
+                FYERS_TOKEN_TIMESTAMP = time.time()
                 save_fyers_token_to_json(self.access_token)
-                
+
                 print("Authentication successful!")
                 print(f"Access Token: {self.access_token[:20]}...")
-                
-                success_message = "<b>Fyers Authentication Successful!</b>\n\nYou can now start monitoring."
+
+                success_message = "<b>✅ Fyers Authentication Successful!</b>\n\nYou can now start monitoring."
                 self.telegram_handler.send_message(success_message)
-                
+
                 return True
             else:
                 print(f"Authentication failed: {response}")
+                error_msg = response.get('message', 'Unknown error') if response else 'No response'
+                self.telegram_handler.send_message(f"<b>❌ Authentication Failed</b>\n\nError: {error_msg}\n\nPlease try again with a fresh URL.")
                 return False
-                
+
         except Exception as e:
             print(f"Error during authentication: {e}")
             import traceback
             traceback.print_exc()
             return False
-    
+
+    def refresh_token_if_expired(self):
+        """Check if token is expired and trigger re-authentication if needed"""
+        try:
+            is_valid, message = self.check_token_expiry_from_fyers()
+
+            if not is_valid:
+                print(f"Token expired: {message}")
+                print("Initiating re-authentication...")
+
+                self.is_authenticated = False
+                self.access_token = None
+
+                # Trigger fresh authentication
+                return self.authenticate()
+
+            return True
+
+        except Exception as e:
+            print(f"Error refreshing token: {e}")
+            return False
+
     def get_access_token(self):
-        """Get the access token"""
+        """Get the access token, refreshing if needed"""
         if not self.is_authenticated:
             if not self.authenticate():
                 return None
+        else:
+            # Periodically verify token is still valid
+            is_valid, _ = self.check_token_expiry_from_fyers()
+            if not is_valid:
+                print("Token expired, re-authenticating...")
+                self.is_authenticated = False
+                if not self.authenticate():
+                    return None
+
         return self.access_token
 
 # =============================================================================
@@ -2192,23 +1737,18 @@ class VolumeSpikeDetector:
 # =============================================================================
 
 def start_all_services():
-    """Start both the volume detector and summary scheduler"""
-    print("Starting all services...")
-    
-    summary_thread = threading.Thread(target=summary_scheduler, daemon=True)
-    summary_thread.start()
-    print("Summary scheduler started in background")
-    
+    """Start the volume detector service"""
+    print("Starting volume spike detector...")
     supervisor_loop()
 
 if __name__ == "__main__":
     try:
         print("="*50)
-        print("Fyers Volume Spike Detector with Daily Summary")
+        print("Fyers Volume Spike Detector")
         print("="*50)
-        
+
         start_all_services()
-        
+
     except KeyboardInterrupt:
         print("\nShutting down gracefully...")
         _stop_stream_once()
