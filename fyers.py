@@ -45,7 +45,7 @@ INDIVIDUAL_TRADE_THRESHOLD = 30000000  # Rs 3 crores for individual trades
 MIN_VOLUME_SPIKE = 1000  # Minimum volume spike to consider
 
 # Google Sheets Configuration
-GOOGLE_SHEETS_ID = "1kgrKVjUm0lB0fz-74Q_C-sXls7IyyqFDGhf8NZmGG4A"
+GOOGLE_SHEETS_ID = "1l_6Sx_u1czhY-5JdT22tpmCV8Os3XuZmZ3U2ShKDLHw"
 
 # =============================================================================
 # RUN CONTROLLER GLOBALS
@@ -1717,5 +1717,6 @@ if __name__ == "__main__":
         traceback.print_exc()
         _stop_stream_once()
         sys.exit(1)
+
 
 
